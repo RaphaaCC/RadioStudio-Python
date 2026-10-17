@@ -128,7 +128,10 @@ class AutoDJTests(unittest.TestCase):
             original_entries = MusicLibrary._entries
 
             def failing_entries(directory):
-                if directory == protected:
+                # The stored library root is resolved before scanning, so compare
+                # the directory identity by its stable leaf/parent names rather
+                # than by the original temporary Path spelling on Windows.
+                if directory.name == "restricted" and directory.parent.name == "music":
                     raise PermissionError(errno.EACCES, "access denied", str(directory))
                 return original_entries(directory)
 
