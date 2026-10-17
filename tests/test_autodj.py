@@ -125,17 +125,14 @@ class AutoDJTests(unittest.TestCase):
             library_id = store.add_library("Music", str(root))
             self.assertEqual(store.scan_library(library_id), (1, 0, 0))
 
-            # Patch the concrete path class (WindowsPath/PosixPath). Patching
-            # Path itself is not reliable on every Python/platform combination.
-            path_type = type(protected)
-            original_iterdir = path_type.iterdir
+            original_entries = MusicLibrary._entries
 
-            def failing_iterdir(path, *args, **kwargs):
-                if path == protected:
-                    raise PermissionError(errno.EACCES, "access denied", str(path))
-                return original_iterdir(path, *args, **kwargs)
+            def failing_entries(directory):
+                if directory == protected:
+                    raise PermissionError(errno.EACCES, "access denied", str(directory))
+                return original_entries(directory)
 
-            with patch.object(path_type, "iterdir", autospec=True, side_effect=failing_iterdir):
+            with patch.object(MusicLibrary, "_entries", side_effect=failing_entries):
                 indexed, skipped, errors = store.scan_library(library_id)
 
             self.assertEqual((indexed, skipped), (0, 0))
