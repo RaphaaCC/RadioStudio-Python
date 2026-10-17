@@ -34,6 +34,18 @@ class AutoDJTests(unittest.TestCase):
                                        "keyword_fields": ["title", "album"]})
         self.assertEqual(["a"], [track["path"] for track in result])
 
+    def test_year_filter_excludes_tracks_with_unknown_year(self):
+        tracks = [
+            {"path": "known", "title": "Known", "year": "2008"},
+            {"path": "unknown", "title": "Unknown", "year": ""},
+            {"path": "invalid", "title": "Invalid", "year": "not-a-year"},
+            {"path": "newer", "title": "Newer", "year": "2015"},
+        ]
+
+        result = filter_tracks(tracks, {"year_to": 2010})
+
+        self.assertEqual(["known"], [track["path"] for track in result])
+
     def test_repeat_cooldowns_fall_back_without_stalling(self):
         with tempfile.TemporaryDirectory() as folder:
             first = Path(folder) / "first.mp3"; first.write_bytes(b"a")

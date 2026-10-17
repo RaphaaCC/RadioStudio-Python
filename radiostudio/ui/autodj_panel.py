@@ -76,7 +76,7 @@ class ProgramDialog(QDialog):
         day_box = QGroupBox("Dias da semana")
         day_layout = QHBoxLayout(day_box)
         saved_days = set()
-        raw_days = program.get("days", range(7))
+        raw_days = program.get("days", list(range(7)))
         if isinstance(raw_days, (list, tuple, set)):
             for day in raw_days:
                 try:
@@ -542,4 +542,3 @@ class AutoDJPanel(QWidget):
             return
         self.library.clear_history()
         self.refresh_history(); self.main_window.save_state()
-

@@ -1,20 +1,20 @@
 import struct
 import unittest
 
-from PySide6.QtCore import QCoreApplication
+from PySide6.QtWidgets import QApplication
 from PySide6.QtMultimedia import QAudioFormat
 
 from radiostudio.services.audio_inputs import (convert_input_to_master,
                                                convert_master_to_device,
                                                mix_pcm_chunks, pcm_rms_db,
                                                AudioInputController)
-from radiostudio.services.broadcast import SAMPLE_RATE
+from radiostudio.services.broadcast import PCM_BYTES_PER_FRAME, SAMPLE_RATE
 
 
 class AudioInputConversionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.app = QCoreApplication.instance() or QCoreApplication([])
+        cls.app = QApplication.instance() or QApplication([])
 
     def test_mono_int16_input_becomes_stereo_master_pcm(self):
         audio_format = QAudioFormat()
@@ -85,6 +85,56 @@ class AudioInputConversionTests(unittest.TestCase):
 
         self.assertEqual(statuses, [("monitor", "Sem dispositivo para monitorar as entradas")])
         self.assertEqual(len(resolved), 1)
+        controller.deleteLater()
+        self.app.processEvents()
+
+    def test_monitor_gain_does_not_attenuate_broadcast_input(self):
+        class FakeBroadcast:
+            def __init__(self):
+                self.calls = []
+
+            def push_audio(self, source, data, gain=1.0):
+                self.calls.append((source, data, gain))
+
+            def remove_source(self, _source):
+                pass
+
+        class ReadDevice:
+            def __init__(self, data):
+                self.data = bytearray(data)
+
+            def bytesAvailable(self):
+                return len(self.data)
+
+            def read(self, length):
+                chunk = bytes(self.data[:length])
+                del self.data[:length]
+                return chunk
+
+        audio_format = QAudioFormat()
+        audio_format.setSampleRate(SAMPLE_RATE)
+        audio_format.setChannelCount(2)
+        audio_format.setSampleFormat(QAudioFormat.Int16)
+        frame = struct.pack("<" + "h" * (PCM_BYTES_PER_FRAME // 2),
+                            *([12000] * (PCM_BYTES_PER_FRAME // 2)))
+        broadcast = FakeBroadcast()
+        controller = AudioInputController(broadcast)
+        controller.monitor_enabled = False
+        controller.monitor_gain = 0.05
+        controller.active["aux1"] = {
+            "io": ReadDevice(frame),
+            "format": audio_format,
+            "pending": bytearray(),
+            "raw_pending": bytearray(),
+            "input_frame_bytes": 4,
+        }
+
+        controller._pump()
+
+        self.assertEqual(len(broadcast.calls), 1)
+        self.assertEqual(broadcast.calls[0][0], "input:aux1")
+        self.assertEqual(broadcast.calls[0][2], 1.0)
+        controller.active.clear()
         controller.deleteLater()
         self.app.processEvents()
 

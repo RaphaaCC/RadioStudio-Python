@@ -337,7 +337,9 @@ class AudioInputController(QObject):
                 while len(item["pending"]) >= PCM_BYTES_PER_FRAME:
                     frame = bytes(item["pending"][:PCM_BYTES_PER_FRAME])
                     del item["pending"][:PCM_BYTES_PER_FRAME]
-                    self.broadcast.push_audio(f"input:{channel}", frame, self.monitor_gain)
+                    # The monitor slider only controls local listening. Live inputs
+                    # must reach the program bus at unity just like the main deck.
+                    self.broadcast.push_audio(f"input:{channel}", frame, 1.0)
                     buffer = self.monitor_buffers.get(channel)
                     if self.monitor_enabled and buffer is not None:
                         buffer.append(frame)

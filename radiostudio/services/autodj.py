@@ -130,6 +130,11 @@ def filter_tracks(tracks, filters):
             track_year = int(track.get("year") or 0)
         except (TypeError, ValueError, OverflowError):
             track_year = 0
+        # An unknown year cannot satisfy a user-requested year range. Previously
+        # year_to by itself treated missing/invalid years as year zero and let
+        # those tracks through.
+        if (year_from or year_to) and track_year <= 0:
+            continue
         if year_from and track_year < year_from:
             continue
         if year_to and track_year > year_to:
