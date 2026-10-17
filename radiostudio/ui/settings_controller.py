@@ -49,9 +49,14 @@ class SettingsControllerMixin:
         self.apply_audio_devices()
         self.audio_input_controller.speech_threshold_db = self.speech_threshold_db
         self.update_music_duck_target()
-        if current_track and self.player.playbackState() != QMediaPlayer.StoppedState:
+        # The modal settings window can stay open long enough for playback to
+        # advance. Re-read the current row here instead of publishing metadata
+        # captured when the dialog was opened.
+        current_on_air = (read_track_metadata(self.tracks[self.current_index])
+                          if 0 <= self.current_index < len(self.tracks) else None)
+        if current_on_air and self.player.playbackState() != QMediaPlayer.StoppedState:
             self.broadcast.set_title(format_broadcast_title(
-                self.station_metadata["title_format"], current_track, self.station_metadata))
+                self.station_metadata["title_format"], current_on_air, self.station_metadata))
         if self.broadcast.local_server:
             server = self.broadcast.local_server
             server.station = self.broadcast_panel.local_config()["station"] or self.station_metadata["name"]
