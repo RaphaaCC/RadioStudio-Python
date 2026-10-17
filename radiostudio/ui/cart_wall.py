@@ -49,12 +49,8 @@ class CartWallMixin:
         player.setAudioOutput(output)
         buffer_output = QAudioBufferOutput(self.broadcast_format, self)
         source_id = f"cart-{id(player)}"
-        # Keep broadcast carts in the same music-duck envelope as their local
-        # monitor. Previously only the local cart level fell under microphone
-        # ducking, while listeners still heard the cart at full level.
         buffer_output.audioBufferReceived.connect(
-            lambda buffer, key=source_id: self.forward_buffer(
-                key, buffer, 0.8 * self.music_duck_gain))
+            lambda buffer, key=source_id: self.forward_buffer(key, buffer, 0.8))
         player.setAudioBufferOutput(buffer_output)
         player.setSource(QUrl.fromLocalFile(path))
         self.cart_players.append((player, output, buffer_output, source_id))
