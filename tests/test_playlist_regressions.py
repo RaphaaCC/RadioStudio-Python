@@ -1,6 +1,6 @@
 import unittest
 
-from radiostudio.ui.playlist import PlaylistMixin
+from radiostudio.ui.playlist import PlaylistMixin, m3u_entries
 
 
 class _SelectionModel:
@@ -65,6 +65,12 @@ class PlaylistRegressionTests(unittest.TestCase):
         self.assertTrue(harness.refreshed)
         self.assertTrue(harness.saved)
         self.assertTrue(harness.playlist.cleared)
+
+    def test_m3u_entries_strip_whitespace_and_ignore_indented_comments(self):
+        self.assertEqual(
+            m3u_entries([" #EXTM3U ", " song one.mp3  ", "", "\t#EXTINF:10,x", "sub/song two.mp3\t"]),
+            ["song one.mp3", "sub/song two.mp3"],
+        )
 
 
 if __name__ == "__main__":
