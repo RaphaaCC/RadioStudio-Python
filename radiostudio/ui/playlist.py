@@ -181,7 +181,7 @@ class PlaylistMixin:
         self.tracks = [track for _, track, _source in ordered]
         self.track_sources = [source for _, _track, source in ordered]
         if old_current >= 0:
-            self.current_index = next((new_index for new_index, (old_index, _track)
+            self.current_index = next((new_index for new_index, (old_index, _track, _source)
                                        in enumerate(ordered) if old_index == old_current), -1)
         self.refresh_playlist()
         self.playlist.clearSelection()
