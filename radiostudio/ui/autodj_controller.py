@@ -5,7 +5,9 @@ import time
 
 from ._shared import *
 from ..runtime_safety import guarded
-from ..services.autodj import active_program, choose_track, filter_tracks, program_signature
+from ..services.autodj import (
+    active_program, choose_track, filter_tracks, program_signature, reserve_track,
+)
 
 
 class AutoDJControllerMixin:
@@ -89,7 +91,23 @@ class AutoDJControllerMixin:
         if not config.get("enabled"):
             target = max(target, 1) if force else 0
         needed = max(0, target - pending_count)
-        history = self.music_library.latest_track_plays()
+
+        raw_history = self.music_library.latest_track_plays()
+        history = (dict(raw_history[0]), dict(raw_history[1]))
+        selection_time = time.time()
+        candidate_by_path = {
+            str(track.get("path", "")).casefold(): track
+            for track in candidates if isinstance(track, dict) and track.get("path")
+        }
+        # Cooldowns must also cover the current/upcoming queue. Without this,
+        # filling four rows in one pass can enqueue the same artist repeatedly
+        # because none of those future tracks has reached play_history yet.
+        queued_from = max(0, self.current_index)
+        for queued_path in self.tracks[queued_from:]:
+            queued_track = candidate_by_path.get(str(queued_path).casefold())
+            if queued_track:
+                reserve_track(history, queued_track, now=selection_time)
+
         added = 0
         notes = []
         while needed > 0:
@@ -98,6 +116,7 @@ class AutoDJControllerMixin:
                 artist_cooldown_minutes=config.get("artist_cooldown_minutes", 60),
                 track_cooldown_minutes=config.get("track_cooldown_minutes", 360),
                 excluded_paths=excluded,
+                now=selection_time,
             )
             if not track:
                 if note:
@@ -106,6 +125,7 @@ class AutoDJControllerMixin:
             self.tracks.append(track["path"])
             self.track_sources.append("autodj")
             excluded.append(track["path"])
+            reserve_track(history, track, now=selection_time)
             added += 1
             needed -= 1
             if note and note not in notes:
