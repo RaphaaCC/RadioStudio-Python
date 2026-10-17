@@ -1,7 +1,7 @@
 import struct
 import unittest
 
-from PySide6.QtCore import QCoreApplication
+from PySide6.QtWidgets import QApplication
 from PySide6.QtMultimedia import QAudioFormat
 
 from radiostudio.services.audio_inputs import (convert_input_to_master,
@@ -14,7 +14,7 @@ from radiostudio.services.broadcast import PCM_BYTES_PER_FRAME, SAMPLE_RATE
 class AudioInputConversionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.app = QCoreApplication.instance() or QCoreApplication([])
+        cls.app = QApplication.instance() or QApplication([])
 
     def test_mono_int16_input_becomes_stereo_master_pcm(self):
         audio_format = QAudioFormat()
