@@ -125,14 +125,18 @@ class AutoDJTests(unittest.TestCase):
             library_id = store.add_library("Music", str(root))
             self.assertEqual(store.scan_library(library_id), (1, 0, 0))
 
-            original_stat = Path.stat
+            # Mock directory enumeration rather than stat(). On Windows the
+            # concrete WindowsPath implementation can bypass a Path.stat mock,
+            # which made this regression test report the track as merely
+            # unchanged instead of actually simulating an inaccessible folder.
+            original_iterdir = Path.iterdir
 
-            def failing_stat(path, *args, **kwargs):
+            def failing_iterdir(path, *args, **kwargs):
                 if path == protected:
                     raise PermissionError(errno.EACCES, "access denied", str(path))
-                return original_stat(path, *args, **kwargs)
+                return original_iterdir(path, *args, **kwargs)
 
-            with patch.object(Path, "stat", autospec=True, side_effect=failing_stat):
+            with patch.object(Path, "iterdir", autospec=True, side_effect=failing_iterdir):
                 indexed, skipped, errors = store.scan_library(library_id)
 
             self.assertEqual((indexed, skipped), (0, 0))
