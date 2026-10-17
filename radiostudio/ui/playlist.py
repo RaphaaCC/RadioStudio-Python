@@ -4,6 +4,16 @@ from ._shared import *
 from ..runtime_safety import guarded
 
 
+def m3u_entries(lines):
+    """Return meaningful M3U path entries with surrounding whitespace removed."""
+    result = []
+    for raw in lines:
+        line = str(raw).strip()
+        if line and not line.startswith("#"):
+            result.append(line)
+    return result
+
+
 class PlaylistMixin:
     @guarded
     def refresh_playlist(self):
@@ -90,9 +100,9 @@ class PlaylistMixin:
             return
         self.cancel_pending_transition()
         base = Path(path).parent
-        lines = Path(path).read_text(encoding="utf-8-sig", errors="replace").splitlines()
+        lines = m3u_entries(Path(path).read_text(encoding="utf-8-sig", errors="replace").splitlines())
         self.tracks = [str((base / line).resolve()) if not Path(line).is_absolute() else line
-                       for line in lines if line.strip() and not line.startswith("#")]
+                       for line in lines]
         self.track_sources = ["manual"] * len(self.tracks)
         self.current_index = -1
         self.refresh_playlist()
