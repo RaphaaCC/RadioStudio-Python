@@ -58,11 +58,13 @@ class AudioPipelineMixin:
         if active and player.playbackState() == QMediaPlayer.PlayingState:
             self.on_air.feed_audio_buffer(buffer)
             self.detect_trailing_silence(buffer)
-            self.forward_buffer("main", buffer, self.master_volume * self.main_gain)
+            # master_volume belongs to local monitoring. Keep the program feed at
+            # unity and apply only transition/ducking gains before transmission.
+            self.forward_buffer("main", buffer, self.main_gain)
         elif (player is self.mix_player
               and player.playbackState() == QMediaPlayer.PlayingState
               and self.player.playbackState() != QMediaPlayer.PausedState):
-            self.forward_buffer("mix", buffer, self.master_volume * self.mix_gain)
+            self.forward_buffer("mix", buffer, self.mix_gain)
 
     @guarded
     def detect_trailing_silence(self, buffer):
@@ -95,8 +97,10 @@ class AudioPipelineMixin:
             frames = len(samples) // channels
             self.silence_ms += round(frames * 1000 / sample_rate) if sample_rate else 0
             if self.silence_ms >= self.silence_hold_ms:
-                # Match the fade to the remaining tail so it reaches the media
-                # end instead of finishing early and consuming the next song.
-                self.start_mix(remaining)
+                # Use the remaining silent tail as overlap, but do not fade the
+                # incoming song over that entire tail. A long silence should be
+                # trimmed quickly instead of making the next track crawl in.
+                fade_ms = min(1200, max(250, remaining))
+                self.start_mix(remaining, fade_in_ms=fade_ms, fade_out_ms=fade_ms)
         else:
             self.silence_ms = 0
