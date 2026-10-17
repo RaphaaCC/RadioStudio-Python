@@ -1,0 +1,33 @@
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - "fix/**"
+
+jobs:
+  windows-tests:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Run unit tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m unittest discover -s tests -v
+      - name: Compile package
+        run: python -m compileall -q radiostudio tests
+      - name: Smoke-test window startup and shutdown
+        shell: pwsh
+        run: |
+          $env:QT_QPA_PLATFORM = "offscreen"
+          $env:APPDATA = Join-Path $env:RUNNER_TEMP "RadioStudioPython-smoke"
+          python -c "from PySide6.QtWidgets import QApplication; from radiostudio.ui.main_window import RadioStudio; app=QApplication([]); w=RadioStudio(); w.show(); app.processEvents(); w.request_exit(); app.processEvents(); print('offscreen startup and shutdown: OK')"

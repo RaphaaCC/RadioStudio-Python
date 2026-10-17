@@ -24,7 +24,8 @@ from PySide6.QtWidgets import (
 
 from ..config import (APP_DIR, APP_DISPLAY_NAME, AUDIO_EXTENSIONS, AUDIO_FILTER, MAX_LOG_ROWS,
                       STATE_FILE, clock_text)
-from ..services.broadcast import BroadcastManager, CHANNELS, SAMPLE_RATE
+from ..services.broadcast import CHANNELS, SAMPLE_RATE
+from ..services.broadcast_quality import BroadcastManager
 from ..services.track_metadata import (DEFAULT_STATION_METADATA, format_broadcast_title,
                                        read_track_metadata)
 from .audio_inputs_panel import AudioInputsPanel

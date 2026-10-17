@@ -125,14 +125,17 @@ class AutoDJTests(unittest.TestCase):
             library_id = store.add_library("Music", str(root))
             self.assertEqual(store.scan_library(library_id), (1, 0, 0))
 
-            original_stat = Path.stat
+            original_entries = MusicLibrary._entries
 
-            def failing_stat(path, *args, **kwargs):
-                if path == protected:
-                    raise PermissionError(errno.EACCES, "access denied", str(path))
-                return original_stat(path, *args, **kwargs)
+            def failing_entries(directory):
+                # The stored library root is resolved before scanning, so compare
+                # the directory identity by its stable leaf/parent names rather
+                # than by the original temporary Path spelling on Windows.
+                if directory.name == "restricted" and directory.parent.name == "music":
+                    raise PermissionError(errno.EACCES, "access denied", str(directory))
+                return original_entries(directory)
 
-            with patch.object(Path, "stat", autospec=True, side_effect=failing_stat):
+            with patch.object(MusicLibrary, "_entries", side_effect=failing_entries):
                 indexed, skipped, errors = store.scan_library(library_id)
 
             self.assertEqual((indexed, skipped), (0, 0))

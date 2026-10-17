@@ -37,7 +37,7 @@ class PlaybackMixin:
                     self.gain_timer.stop()
             self.cancel_mix()
             self.stop_pending = True
-            self.ramp_gain("main", 0.0, fade_out_duration)
+            self.ramp_gain("main", 0.0, fade_out_duration, curve="equal_power_out")
             self.schedule_transition_action(
                 fade_out_duration,
                 lambda: self.play_index(index, resume_position_ms, immediate=True),
@@ -130,7 +130,7 @@ class PlaybackMixin:
         if (fade_out_duration
                 and self.player.playbackState() == QMediaPlayer.PlayingState):
             self.stop_pending = True
-            self.ramp_gain("main", 0.0, fade_out_duration)
+            self.ramp_gain("main", 0.0, fade_out_duration, curve="equal_power_out")
             self.schedule_transition_action(fade_out_duration, self.finish_stop, "stop")
             return
         self.finish_stop()
@@ -192,7 +192,7 @@ class PlaybackMixin:
             fade_out_duration = self.automatic_fade_out_ms()
             if fade_out_duration and self.player.playbackState() == QMediaPlayer.PlayingState:
                 self.stop_pending = True
-                self.ramp_gain("main", 0.0, fade_out_duration)
+                self.ramp_gain("main", 0.0, fade_out_duration, curve="equal_power_out")
                 self.schedule_transition_action(
                     fade_out_duration,
                     lambda: self.advance_after_fade(next_index), "advance")
@@ -304,6 +304,10 @@ class PlaybackMixin:
         current = self.main_gain if channel == "main" else self.mix_gain
         self.gain_ramps[channel] = (
             current, float(target), time.monotonic(), max(1, duration_ms), curve)
+        # 100 Hz gain updates make short fades substantially smoother than the
+        # previous 50 Hz staircase while keeping the work trivial for the UI.
+        if hasattr(self.gain_timer, "setInterval"):
+            self.gain_timer.setInterval(10)
         if not self.gain_timer.isActive():
             self.gain_timer.start()
 
@@ -317,7 +321,7 @@ class PlaybackMixin:
         self.apply_pending_main_cue()
         duration_ms = self.fade_in_pending_ms
         self.fade_in_pending_ms = 0
-        self.ramp_gain("main", 1.0, duration_ms)
+        self.ramp_gain("main", 1.0, duration_ms, curve="equal_power_in")
 
     def automatic_fade_in_ms(self, path):
         if not self.auto_transitions_enabled:
@@ -432,9 +436,11 @@ class PlaybackMixin:
             transition_ms = plan.duration_ms
             cue_ms = plan.cue_ms
         else:
-            if not (self.mix_ms or self.fade_out_ms):
+            # Fade in/out are start/stop actions. Only Mix defines automatic
+            # overlap between consecutive tracks.
+            if self.mix_ms <= 0:
                 return
-            transition_ms = max(self.mix_ms, self.fade_out_ms, self.fade_in_ms)
+            transition_ms = self.mix_ms
             cue_ms = 0
         next_duration = read_track_metadata(next_path).duration
         transition_ms = bounded_transition_duration_ms(
@@ -443,7 +449,7 @@ class PlaybackMixin:
             self.start_mix(transition_ms, cue_ms=cue_ms)
 
     @guarded
-    def start_mix(self, duration_ms=None, cue_ms=None):
+    def start_mix(self, duration_ms=None, cue_ms=None, fade_in_ms=None, fade_out_ms=None):
         if (self.mix_target_index >= 0 or self.current_index + 1 >= len(self.tracks)
                 or self.stop_pending
                 or self.player.playbackState() != QMediaPlayer.PlayingState):
@@ -455,15 +461,25 @@ class PlaybackMixin:
         if not Path(path).is_file():
             self.mix_failed_key = failure_key
             return
-        if self.auto_transitions_enabled and duration_ms is None:
+        outgoing_analysis = None
+        if self.auto_transitions_enabled:
+            outgoing_analysis = self.transition_analyses.get(self.tracks[self.current_index])
             plan = plan_automatic_transition(
-                self.transition_analyses.get(self.tracks[self.current_index]),
+                outgoing_analysis,
                 self.transition_analyses.get(path), self.mix_ms)
-            duration_ms = plan.duration_ms
+            if duration_ms is None:
+                duration_ms = plan.duration_ms
             if cue_ms is None:
                 cue_ms = plan.cue_ms
-        requested_duration = max(1, int(duration_ms or self.mix_ms or self.fade_out_ms
-                                         or self.fade_in_ms or 1000))
+            # A long detected silent tail should not make the next song crawl in
+            # for several seconds. Shorten both ramps only when the outgoing tail
+            # is confidently silent; audible fades keep the equal-power overlap.
+            if (fade_in_ms is None and fade_out_ms is None and outgoing_analysis
+                    and outgoing_analysis.trailing_silence_ms >= 800
+                    and outgoing_analysis.tail_fade_ms < 1600):
+                fade_in_ms = plan.fade_in_ms
+                fade_out_ms = plan.fade_in_ms
+        requested_duration = max(1, int(duration_ms or self.mix_ms or 1000))
         outgoing_remaining = self.player.duration() - self.player.position()
         if outgoing_remaining <= 0:
             return
@@ -471,8 +487,20 @@ class PlaybackMixin:
         duration_ms = bounded_transition_duration_ms(
             requested_duration, self.player.duration(), outgoing_remaining,
             round(incoming_duration * 1000))
+
+        def bounded_fade(value):
+            if value is None:
+                return duration_ms
+            try:
+                value = int(value)
+            except (TypeError, ValueError, OverflowError):
+                return duration_ms
+            return min(duration_ms, max(1, value))
+
         self.mix_target_index = self.current_index + 1
         self.mix_fade_duration_ms = duration_ms
+        self.mix_fade_in_duration_ms = bounded_fade(fade_in_ms)
+        self.mix_fade_out_duration_ms = bounded_fade(fade_out_ms)
         self.mix_fade_started = False
         self.mix_cue_ms = max(0, int(cue_ms or 0))
         self.mix_gain = 0.0
@@ -497,9 +525,13 @@ class PlaybackMixin:
             return
         duration_ms = min(max(1, self.mix_fade_duration_ms), remaining)
         self.mix_fade_duration_ms = duration_ms
+        fade_out_ms = min(
+            duration_ms, max(1, getattr(self, "mix_fade_out_duration_ms", duration_ms)))
+        fade_in_ms = min(
+            duration_ms, max(1, getattr(self, "mix_fade_in_duration_ms", duration_ms)))
         self.mix_fade_started = True
-        self.ramp_gain("main", 0.0, duration_ms, curve="equal_power_out")
-        self.ramp_gain("mix", 1.0, duration_ms, curve="equal_power_in")
+        self.ramp_gain("main", 0.0, fade_out_ms, curve="equal_power_out")
+        self.ramp_gain("mix", 1.0, fade_in_ms, curve="equal_power_in")
 
     @guarded
     def promote_mix_player(self):
@@ -510,6 +542,8 @@ class PlaybackMixin:
         self.mix_player, self.mix_audio, self.mix_buffer_output = old_player, old_audio, old_buffer
         self.mix_target_index = -1
         self.mix_fade_duration_ms = 0
+        self.mix_fade_in_duration_ms = 0
+        self.mix_fade_out_duration_ms = 0
         self.mix_fade_started = False
         self.mix_cue_ms = 0
         self.fade_in_pending_ms = 0
@@ -543,6 +577,8 @@ class PlaybackMixin:
         had_active_mix = self.mix_target_index >= 0
         self.mix_target_index = -1
         self.mix_fade_duration_ms = 0
+        self.mix_fade_in_duration_ms = 0
+        self.mix_fade_out_duration_ms = 0
         self.mix_fade_started = False
         self.mix_cue_ms = 0
         self.gain_ramps.pop("mix", None)
