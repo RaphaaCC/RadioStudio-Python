@@ -63,6 +63,36 @@ def program_signature(program):
             tuple(sorted((str(key), repr(value)) for key, value in filters.items())))
 
 
+def _artist_key(track) -> str:
+    if not isinstance(track, dict):
+        return ""
+    return str(track.get("artist") or track.get("albumartist") or "").strip().casefold()
+
+
+def reserve_track(history, track, *, now=None) -> None:
+    """Reserve a queued track in a mutable history snapshot.
+
+    AutoDJ fills several future rows in one pass. Marking each queued selection as
+    recent makes artist/track cooldowns apply to the queue itself, not only to
+    tracks that have already started playing.
+    """
+    if not isinstance(track, dict):
+        return
+    try:
+        timestamp = float(now if now is not None else time.time())
+        if not math.isfinite(timestamp):
+            timestamp = time.time()
+    except (TypeError, ValueError, OverflowError):
+        timestamp = time.time()
+    last_paths, last_artists = history
+    path = str(track.get("path", "")).casefold()
+    if path:
+        last_paths[path] = timestamp
+    artist = _artist_key(track)
+    if artist:
+        last_artists[artist] = timestamp
+
+
 def filter_tracks(tracks, filters):
     filters = filters if isinstance(filters, dict) else {}
     genres = _tokens(filters.get("genres") or filters.get("genre"))
@@ -138,13 +168,14 @@ def choose_track(tracks, history, *, artist_cooldown_minutes=0,
     artist_window = cooldown(artist_cooldown_minutes)
 
     def recent(track, window):
-        played = last_paths.get(str(track.get("path", "")).casefold(), 0)
-        return bool(window and now - played < window)
+        played = last_paths.get(str(track.get("path", "")).casefold())
+        return bool(window and played is not None and played > 0 and now - played < window)
 
     def artist_recent(track):
-        artist = str(track.get("artist") or track.get("albumartist") or "").casefold()
-        played = last_artists.get(artist, 0) if artist else 0
-        return bool(artist_window and now - played < artist_window)
+        artist = _artist_key(track)
+        played = last_artists.get(artist) if artist else None
+        return bool(artist_window and played is not None and played > 0
+                    and now - played < artist_window)
 
     stages = [
         (False, False, ""),
