@@ -137,6 +137,11 @@ class MusicLibrary:
         with self._connect() as db:
             db.execute("DELETE FROM libraries WHERE id=?", (library_id,))
 
+    @staticmethod
+    def _entries(directory: Path):
+        """Return one directory snapshot through a single testable filesystem boundary."""
+        return list(directory.iterdir())
+
     def scan_library(self, library_id: str):
         """Re-index one folder tree. Returns (indexed, skipped, errors)."""
         with self._connect() as db:
@@ -180,7 +185,7 @@ class MusicLibrary:
 
         for directory in [root, *folders]:
             try:
-                entries = list(directory.iterdir())
+                entries = self._entries(directory)
             except OSError:
                 errors += 1
                 complete = False
@@ -228,7 +233,7 @@ class MusicLibrary:
         def add_subdirectories(folder):
             nonlocal errors
             try:
-                entries = list(folder.iterdir())
+                entries = MusicLibrary._entries(folder)
             except OSError:
                 errors += 1
                 return []
