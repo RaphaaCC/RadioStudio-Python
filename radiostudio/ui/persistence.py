@@ -37,7 +37,7 @@ class PersistenceMixin:
         active_player = self.mix_player if use_mix else self.player
         path = (self.tracks[self.mix_target_index] if use_mix
                 and 0 <= self.mix_target_index < len(self.tracks)
-                else active_player.source().toLocalFile())
+                else self.original_media_path(active_player))
         if path:
             self.last_playback = {
                 "path": path,
@@ -167,7 +167,7 @@ class PersistenceMixin:
             self.set_player_controls_position(state.get("player_controls_position", "bottom"))
             self.waveform_style = (state.get("waveform_style")
                                    if isinstance(state.get("waveform_style"), str) else "bars")
-            self.on_air.waveform.set_style(self.waveform_style)
+            self.on_air.set_waveform_style(self.waveform_style)
             playback = state.get("playback", {})
             if isinstance(playback, dict):
                 try:
@@ -266,11 +266,13 @@ class PersistenceMixin:
         self.save_state()
         cleanup_steps = [
             ("pré-escuta", self.preview_player.stop),
+            ("decodificador da pré-escuta", self.preview_dialog.shutdown_fallback),
             ("cart wall", self.stop_all_carts),
             ("entradas de áudio", self.audio_input_controller.stop_all),
             ("transmissão", self.broadcast.stop),
             ("player principal", self.player.stop),
             ("player de mix", self.mix_player.stop),
+            ("decodificador alternativo", self.shutdown_audio_fallback),
             ("visualizador", self.on_air.clear_track),
         ]
         if self.tray_icon:

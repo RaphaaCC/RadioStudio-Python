@@ -14,7 +14,7 @@ Canais:      2 (estéreo)
 Formato:     Int16
 ```
 
-Ou seja, o Qt decodifica MP3/FLAC/WAV/etc. e entrega PCM para o RadioStudio.
+O backend Qt Multimedia instalado decodifica os formatos que suporta e entrega PCM ao RadioStudio. A lista de extensões do explorador é mais ampla que a garantia de decodificação. Se o Qt reportar `InvalidMedia`, `AudioDecodeFallback` tenta decodificar o arquivo com o FFmpeg incluído e cria um WAV PCM temporário para o player. Isso se aplica à playlist, ao Mix, aos carts e à pré-escuta; os arquivos temporários são liberados quando o player troca ou fecha a mídia. O FFmpeg também é usado pelo encoder e pela análise de transições.
 
 A saída local e a transmissão são caminhos relacionados, mas não idênticos. O volume master local não deve ser interpretado como ganho obrigatório do stream; o pipeline de transmissão usa seus próprios ganhos de programa/transição.
 
@@ -44,6 +44,8 @@ Carts usam IDs do tipo `cart-*`; entradas de áudio usam `input:*`.
 
 `forward_buffer()` rejeita formatos incompatíveis e repassa bytes PCM para `BroadcastManager.push_audio()`.
 
+No player principal, o PCM é enfileirado antes do trabalho opcional de visualização e análise de silêncio. O visualizador reativo mantém todas as amostras, mas limita o cálculo/desenho a 30 atualizações por segundo. Os estilos reativos de onda/espectro também dispensam a decodificação integral da faixa em um segundo processo FFmpeg, usada apenas para desenhar a forma estática. Essa redução diminui trabalho concorrente no caminho da reprodução; ainda não prova que a carga da interface era a causa dos cortes.
+
 ## 3. Buffers por fonte
 
 Em `radiostudio/services/broadcast.py`, cada fonte possui um `PCMBuffer`.
@@ -65,17 +67,17 @@ Cálculo aproximado:
 
 Cada `PCMBuffer` mantém até aproximadamente 2 segundos de PCM antes de descartar os blocos mais antigos.
 
-### Comportamento importante de `PCMBuffer.take()`
+### Comportamento atual de `PCMBuffer.take()`
 
-O mixer pede sempre exatamente `PCM_BYTES_PER_FRAME`.
-
-Se houver menos dados disponíveis do que o frame solicitado, `take()` completa o restante com:
+O mixer pede sempre exatamente `PCM_BYTES_PER_FRAME`. Uma fonte nova espera dois frames (40 ms) antes de começar a ser consumida. Se ela ficar abaixo do frame pedido depois de iniciar, `take()` completa o restante com:
 
 ```python
 b"\0"
 ```
 
-Portanto, uma entrega irregular do Qt pode potencialmente produzir um frame parcialmente real e parcialmente silencioso.
+Portanto, uma entrega irregular do Qt ainda pode produzir um frame parcialmente real e parcialmente silencioso. Aquecimento, underruns e bytes preenchidos com zero ficam contados para diagnóstico.
+
+Depois de um underrun, a fonte permanece armada e volta a consumir assim que chegarem novos samples; ela não espera novamente os 40 ms completos. Isso evita estender uma pequena falha de temporização com silêncio de rebufferização.
 
 Isso é especialmente relevante para investigar cliques, pequenas descontinuidades e microengasgos.
 
@@ -106,7 +108,7 @@ Isso evita hard clipping bruto em picos de crossfade/carts/entradas, mas não é
 
 ## 5. Fila entre mixer e encoder
 
-Cada `EncoderOutput` possui:
+Cada `EncoderOutput` mantém uma fila de PCM. A saída só aceita frames quando o encoder está pronto (`Ativo`); durante conexão e reconexão, frames novos são descartados para não transmitir backlog antigo quando o destino voltar:
 
 ```python
 queue.Queue(maxsize=120)
@@ -120,7 +122,7 @@ Como o mixer gera um frame a cada 20 ms, a capacidade nominal corresponde a:
 
 ou aproximadamente **2,4 segundos de PCM**.
 
-Quando a fila está cheia, `feed()` remove um item antigo e tenta inserir o novo.
+Quando a fila está cheia durante operação ativa, `feed()` remove um item antigo e tenta inserir o novo. Se um consumidor retirar o item ao mesmo tempo, `feed()` tenta inserir o frame atual novamente; descartes reais ficam contados. Ao trocar de faixa ou buscar, o PCM anterior é limpo; a fonte principal preserva o estado de aquecimento para não reinserir o silêncio inicial de 40 ms em cada troca. Na promoção do Mix, mantém o buffer da música que está entrando e descarta o tail da música que saiu.
 
 Consequência: se o encoder ou a rede ficarem mais lentos do que o mixer por tempo suficiente, o programa pode começar a **descartar áudio antigo** em vez de aplicar backpressure ao produtor.
 
@@ -128,11 +130,13 @@ Isso é uma hipótese importante para saltos ou recuperação brusca após lag.
 
 ## 6. Encoder MP3
 
-`EncoderOutput._run()` abre FFmpeg obtido por `imageio_ffmpeg`.
+`EncoderOutput._run()` abre FFmpeg obtido por `imageio_ffmpeg`. Como o formato, a taxa e os canais do PCM de entrada são fixos e conhecidos, o encoder limita a análise de entrada com `-probesize 32 -analyzeduration 0`. Sem isso, o FFmpeg mantinha um atraso inicial observável enquanto analisava o pipe PCM.
 
 Entrada do FFmpeg:
 
 ```text
+-probesize 32
+-analyzeduration 0
 -f s16le
 -ar 44100
 -ac 2
@@ -156,7 +160,7 @@ Em termos práticos:
 PCM int16 -> libmp3lame -> MP3 CBR
 ```
 
-O perfil novo de transmissão usa 128 kbps por padrão, embora o usuário possa configurar outro valor.
+Novos perfis usam 192 kbps por padrão; o usuário ainda pode escolher 32–320 kbps. Há níveis de complexidade de 0 a 9 para `libmp3lame`; níveis menores priorizam qualidade e usam mais CPU.
 
 ### Re-encoding de material já comprimido
 
@@ -172,23 +176,23 @@ MP3 do stream
 
 Isso é uma **segunda compressão com perdas**. Em 128 kbps, artefatos perceptivos em pratos, sibilância, reverbs e texturas complexas são plausíveis.
 
-## 7. Leitura do MP3 codificado
+## 7. Leitura e publicação do MP3 codificado
 
-Uma thread separada executa aproximadamente:
+Uma thread lê a saída do FFmpeg em blocos de até 1024 bytes e os coloca em uma fila MP3 limitada. Uma segunda thread publica esses blocos para o destino.
 
 ```python
-process.stdout.read(4096)
+process.stdout.read(1024) -> fila MP3 (limite aproximado de 2 s, ajustado ao bitrate) -> writer de rede
 ```
 
 Cada bloco lido é enviado para o destino.
 
-A 128 kbps, 4096 bytes equivalem aproximadamente a:
+A 128 kbps, 1024 bytes equivalem aproximadamente a:
 
 ```text
-4096 × 8 / 128000 ≈ 0,256 s
+1024 × 8 / 128000 ≈ 0,064 s
 ```
 
-Isso não significa necessariamente 256 ms adicionais fixos de latência, porque pipes e buffers do sistema podem retornar de maneiras diferentes, mas mostra que a publicação trabalha em blocos relativamente grandes de saída comprimida.
+Isso não significa necessariamente 64 ms adicionais fixos de latência, porque pipes e buffers do sistema podem retornar de maneiras diferentes. A fila limita o atraso acumulado; se lotar, a saída reconecta e descarta o backlog em vez de transmitir áudio cada vez mais atrasado.
 
 ## 8. Icecast
 
@@ -198,19 +202,14 @@ Cabeçalhos relevantes incluem:
 
 ```text
 Content-Type: audio/mpeg
-Transfer-Encoding: chunked
+Expect: 100-continue
 Connection: keep-alive
 Authorization: Basic ...
 ```
 
-Depois da autenticação, cada bloco MP3 é publicado usando HTTP chunked encoding:
+Após `100 Continue` (ou uma resposta de sucesso direta), os blocos MP3 são enviados sem enquadramento HTTP adicional. Isso segue o comportamento do muxer Icecast do FFmpeg (`chunked_post=0`) e mantém compatibilidade com Icecast 2.4.x, que não aceita corpo PUT em chunked encoding. A documentação do Icecast registra suporte a chunked PUT como adicionado na série 2.5.
 
-```text
-<tamanho hexadecimal>\r\n
-<dados MP3>\r\n
-```
-
-O socket possui timeout. Se `sendall()` ficar bloqueado por rede/servidor lento, a thread de leitura/publicação do encoder também pode atrasar.
+O socket possui timeout. Se `sendall()` ficar bloqueado por rede/servidor lento, a thread de escrita para rede pode atrasar; a leitura do FFmpeg continua até a fila MP3 se esgotar. Se a fila lotar, a saída é reconectada.
 
 ## 9. SHOUTcast
 
@@ -224,11 +223,14 @@ Por isso, qualquer defeito que já exista no PCM, mixer ou libmp3lame tende a ap
 Qt Multimedia
   = playback + decode para PCM
 
+AudioDecodeFallback / FFmpeg
+  = decodificação alternativa para WAV temporário quando Qt rejeita a fonte
+
 RadioStudio / Python
   = roteamento, ganhos, buffers, mixagem, limiter e timing
 
 FFmpeg/libmp3lame
-  = encode PCM -> MP3
+  = encode PCM -> MP3 para transmissão
 
 RemoteSink
   = protocolo/socket para Icecast ou SHOUTcast

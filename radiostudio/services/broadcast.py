@@ -29,8 +29,34 @@ SAMPLE_RATE = 44100
 CHANNELS = 2
 FRAME_MS = 20
 PCM_BYTES_PER_FRAME = SAMPLE_RATE * CHANNELS * 2 * FRAME_MS // 1000
+ENCODED_CHUNK_BYTES = 1024
+ENCODED_QUEUE_MAX_MS = 2000
+OUTPUT_RECONNECT_DELAY = 2.0
+OUTPUT_RECONNECT_MAX_DELAY = 30.0
 CREDENTIAL_SERVICE = "RadioStudioPython.Broadcast"
 SETTINGS_DIR = APP_DIR
+
+
+def reconnect_delay(failed_attempts: int) -> float:
+    """Bound retries so an unavailable server is not hammered continuously."""
+    try:
+        attempts = max(1, int(failed_attempts))
+    except (TypeError, ValueError, OverflowError):
+        attempts = 1
+    exponent = min(attempts - 1, 8)
+    return min(OUTPUT_RECONNECT_MAX_DELAY, OUTPUT_RECONNECT_DELAY * (2 ** exponent))
+
+
+ENCODER_QUALITY_PRESETS = (
+    ("Máxima (mais lenta)", 0), ("Alta", 2), ("Equilibrada", 5), ("Rápida", 7),
+)
+
+
+def encoded_queue_capacity(bitrate: int) -> int:
+    """Keep the encoded backlog near two seconds at every configured bitrate."""
+    safe_bitrate = max(1, int(bitrate))
+    return max(1, int(ENCODED_QUEUE_MAX_MS * safe_bitrate /
+                      (ENCODED_CHUNK_BYTES * 8)))
 
 
 class PortInUseError(OSError):
@@ -49,7 +75,7 @@ class ExclusiveHTTPServer(ThreadingHTTPServer):
 def new_profile(kind: str = "icecast") -> dict:
     return {"id": uuid.uuid4().hex, "kind": kind, "name": kind.title(),
             "host": "", "port": 8000, "mount": "/live.mp3", "user": "source",
-            "bitrate": 128, "enabled": True, "station": "",
+            "bitrate": 192, "encoder_quality": 2, "enabled": True, "station": "",
             "genre": "", "url": "", "description": "", "tls": False,
             "metadata_user": "admin", "http_port": 0, "stream_id": 1}
 
@@ -76,19 +102,62 @@ class PCMBuffer:
         self.chunks = deque()
         self.length = 0
         self.lock = threading.Lock()
+        self.capacity_bytes = SAMPLE_RATE * CHANNELS * 2 * 2
+        self.min_prebuffer_bytes = PCM_BYTES_PER_FRAME * 2
+        self.primed = False
+        self.warmup_silence_frames = 0
+        self.zero_filled_bytes = 0
+        self.underflow_frames = 0
+        self.dropped_bytes = 0
+        self.high_watermark_bytes = 0
 
     def append(self, data: bytes):
         if not data:
             return
+        data = bytes(data)
+        # Keep only complete stereo int16 frames, including when one unusually
+        # large callback exceeds the entire per-source buffer capacity.
+        frame_bytes = CHANNELS * 2
+        data = data[:len(data) - (len(data) % frame_bytes)]
+        if not data:
+            return
         with self.lock:
+            if len(data) > self.capacity_bytes:
+                self.dropped_bytes += len(data) - self.capacity_bytes
+                data = data[-self.capacity_bytes:]
             self.chunks.append(data)
             self.length += len(data)
-            while self.length > SAMPLE_RATE * CHANNELS * 2 * 2 and self.chunks:
-                self.length -= len(self.chunks.popleft())
+            while self.length > self.capacity_bytes and self.chunks:
+                excess = self.length - self.capacity_bytes
+                oldest = self.chunks[0]
+                if len(oldest) <= excess:
+                    self.chunks.popleft()
+                    self.length -= len(oldest)
+                    self.dropped_bytes += len(oldest)
+                else:
+                    self.chunks[0] = oldest[excess:]
+                    self.length -= excess
+                    self.dropped_bytes += excess
+            self.high_watermark_bytes = max(self.high_watermark_bytes, self.length)
+
+    def clear(self, *, preserve_primed: bool = False):
+        """Discard queued samples, optionally preserving steady-state startup."""
+        with self.lock:
+            self.chunks.clear()
+            self.length = 0
+            if not preserve_primed:
+                self.primed = False
 
     def take(self, length: int) -> bytes:
+        length = max(0, int(length))
+        if not length:
+            return b""
         result = bytearray()
         with self.lock:
+            if not self.primed and self.length < self.min_prebuffer_bytes:
+                self.warmup_silence_frames += 1
+                return b"\0" * length
+            self.primed = True
             while self.chunks and len(result) < length:
                 chunk = self.chunks.popleft()
                 needed = length - len(result)
@@ -98,9 +167,25 @@ class PCMBuffer:
                     remainder = chunk[needed:]
                     self.chunks.appendleft(remainder)
                     break
-        if len(result) < length:
-            result.extend(b"\0" * (length - len(result)))
+            if len(result) < length:
+                missing = length - len(result)
+                self.zero_filled_bytes += missing
+                self.underflow_frames += 1
+                result.extend(b"\0" * missing)
         return bytes(result)
+
+    def diagnostics_snapshot(self):
+        with self.lock:
+            return {"buffer_ms": round(self.length * 1000 / (SAMPLE_RATE * CHANNELS * 2)),
+                    "prebuffer_ms": round(self.min_prebuffer_bytes * 1000 /
+                                           (SAMPLE_RATE * CHANNELS * 2)),
+                    "primed": self.primed,
+                    "warmup_silence_frames": self.warmup_silence_frames,
+                    "high_watermark_ms": round(self.high_watermark_bytes * 1000 /
+                                                (SAMPLE_RATE * CHANNELS * 2)),
+                    "underflow_frames": self.underflow_frames,
+                    "zero_filled_bytes": self.zero_filled_bytes,
+                    "dropped_bytes": self.dropped_bytes}
 
 
 class LocalStreamServer:
@@ -112,6 +197,7 @@ class LocalStreamServer:
         self.genre = genre
         self.url = url
         self.description = description
+        self.diagnostics_provider = None
         self.title = ""
         self.tls = False
         self.clients: set[queue.Queue] = set()
@@ -139,10 +225,19 @@ class LocalStreamServer:
 
             def do_GET(self):
                 if self.path == "/status.json":
+                    diagnostics = {}
+                    if callable(owner.diagnostics_provider):
+                        try:
+                            diagnostics = owner.diagnostics_provider()
+                        except Exception:
+                            logging.getLogger("radiostudio").exception(
+                                "Falha ao coletar diagnóstico da transmissão")
                     body = json.dumps({"station": owner.station, "genre": owner.genre,
                                        "url": owner.url, "description": owner.description,
                                        "title": owner.title,
-                                       "listeners": owner.listeners}, ensure_ascii=False).encode("utf-8")
+                                       "listeners": owner.listeners,
+                                       "audio_diagnostics": diagnostics},
+                                      ensure_ascii=False).encode("utf-8")
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json; charset=utf-8")
                     self.send_header("Content-Length", str(len(body)))
@@ -266,25 +361,40 @@ class RemoteSink:
                 headers = [f"PUT {quote(mount, safe='/')} HTTP/1.1",
                            f"Host: {profile['host']}:{profile['port']}",
                            f"Authorization: Basic {auth}", "Content-Type: audio/mpeg",
-                           "Transfer-Encoding: chunked", "Connection: keep-alive",
+                           "Expect: 100-continue", "Connection: keep-alive",
                            f"Ice-Name: {profile.get('station', '')}",
                            f"Ice-Genre: {profile.get('genre', '')}",
                            f"Ice-URL: {profile.get('url', '')}",
                            f"Ice-Description: {profile.get('description', '')}", "", ""]
                 sock.sendall("\r\n".join(headers).encode("utf-8"))
                 response = b""
-                for _ in range(2):
+                accepted = False
+                while len(response) < 8192:
                     while b"\r\n\r\n" not in response and len(response) < 8192:
                         chunk = sock.recv(1024)
                         if not chunk:
                             raise ConnectionError("Servidor encerrou a conexão")
                         response += chunk
+                    if b"\r\n\r\n" not in response:
+                        break
                     header, _, response = response.partition(b"\r\n\r\n")
                     status = header.split(b"\r\n", 1)[0]
-                    if b" 100 " not in status:
+                    parts = status.split()
+                    try:
+                        status_code = int(parts[1])
+                    except (IndexError, ValueError):
+                        raise ConnectionError(status.decode("latin-1", "replace"))
+                    # Icecast 2.4.x does not accept chunked PUT bodies. The
+                    # source protocol used by FFmpeg sends Expect: 100-continue
+                    # and then raw MP3 bytes, without HTTP chunk framing.
+                    if status_code == 100 or status_code in (200, 201):
+                        accepted = True
                         break
-                if b" 200 " not in status and b" 201 " not in status:
+                    if 100 <= status_code < 200:
+                        continue
                     raise ConnectionError(status.decode("latin-1", "replace"))
+                if not accepted:
+                    raise ConnectionError("Resposta HTTP incompleta do Icecast")
             elif profile["kind"] == "shoutcast":
                 # DNAS >=2.4.7 maps legacy sources to a stream with password:#SID.
                 stream_id = int(profile.get("stream_id", 1))
@@ -313,20 +423,33 @@ class RemoteSink:
             raise
 
     def publish(self, data: bytes):
+        sock = self.sock
+        if sock is None:
+            raise ConnectionError("Conexão de transmissão encerrada")
         if self.profile["kind"] == "icecast":
-            self.sock.sendall(f"{len(data):X}\r\n".encode() + data + b"\r\n")
+            sock.sendall(data)
         else:
-            self.sock.sendall(data)
+            sock.sendall(data)
 
-    def close(self):
+    def close(self, graceful: bool = True):
         sock, self.sock = self.sock, None
         if sock:
+            if graceful and self.profile["kind"] == "icecast":
+                try:
+                    # The request body is a live, unframed MP3 stream.
+                    # Half-close it cleanly; there is no chunk terminator.
+                    sock.shutdown(socket.SHUT_WR)
+                except OSError:
+                    graceful = False
+            if not graceful:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
             try:
-                if self.profile["kind"] == "icecast":
-                    sock.sendall(b"0\r\n\r\n")
+                sock.close()
             except OSError:
                 pass
-            sock.close()
 
     def listener_count(self) -> int | None:
         profile = self.profile
@@ -353,8 +476,13 @@ class RemoteSink:
 
 
 class EncoderOutput:
-    def __init__(self, name: str, bitrate: int, destination, status_callback=None):
+    def __init__(self, name: str, bitrate: int, destination, status_callback=None,
+                 encoder_quality: int = 2):
         self.name, self.bitrate = name, bitrate
+        try:
+            self.encoder_quality = min(9, max(0, int(encoder_quality)))
+        except (TypeError, ValueError, OverflowError):
+            self.encoder_quality = 2
         self.destination = destination
         self.profile_id = destination.profile["id"] if isinstance(destination, RemoteSink) else None
         self.status = "Parado"
@@ -365,8 +493,17 @@ class EncoderOutput:
         self.thread = None
         self.status_callback = status_callback
         self.listeners = None
+        self.dropped_pcm_frames = 0
+        self.max_pcm_queue_depth = 0
+        self.network_queue = queue.Queue(maxsize=encoded_queue_capacity(bitrate))
+        self.max_network_queue_depth = 0
+        self.dropped_encoded_chunks = 0
+        self.max_publish_ms = 0.0
+        self.slow_publish_count = 0
         self.connection_failed = threading.Event()
         self.stats_thread = None
+        self.reader_thread = None
+        self.writer_thread = None
 
     def _status(self, status: str, error: str = ""):
         self.status, self.error = status, error
@@ -395,20 +532,90 @@ class EncoderOutput:
             self.stop_event.wait(15)
 
     def feed(self, data: bytes):
-        if self.stop_event.is_set():
+        if self.stop_event.is_set() or not data:
+            return
+        # Do not build a stale PCM backlog while a destination is connecting
+        # or reconnecting. Start from live audio once the encoder is ready.
+        if self.status != "Ativo" or self.connection_failed.is_set():
+            self.dropped_pcm_frames += 1
             return
         try:
             self.queue.put_nowait(data)
         except queue.Full:
+            removed_oldest = False
             try:
                 self.queue.get_nowait()
-                self.queue.put_nowait(data)
+                removed_oldest = True
             except queue.Empty:
+                # The encoder may have consumed the item after put_nowait()
+                # reported Full. Retry instead of silently losing this frame.
                 pass
+            try:
+                self.queue.put_nowait(data)
+                if removed_oldest:
+                    self.dropped_pcm_frames += 1
+            except queue.Full:
+                # Another producer filled the gap; keep the mixer alive and
+                # account for each frame that could not be retained.
+                self.dropped_pcm_frames += 1 + int(removed_oldest)
+        self.max_pcm_queue_depth = max(self.max_pcm_queue_depth, self.queue.qsize())
+
+    def _discard_queued_pcm(self):
+        discarded = 0
+        while True:
+            try:
+                self.queue.get_nowait()
+                discarded += 1
+            except queue.Empty:
+                break
+        self.dropped_pcm_frames += discarded
+
+    def _discard_queued_encoded(self):
+        discarded = 0
+        while True:
+            try:
+                self.network_queue.get_nowait()
+                discarded += 1
+            except queue.Empty:
+                break
+        self.dropped_encoded_chunks += discarded
+
+    def _signal_connection_failure(self, message: str, process=None):
+        self.error = str(message)
+        self.connection_failed.set()
+        # The mixer thread writes PCM to FFmpeg's stdin. If FFmpeg is blocked
+        # because its stdout consumer stopped draining, setting the event alone
+        # cannot wake that blocking write. Terminating this exact encoder does.
+        process = process if process is not None else self.process
+        if process is not None:
+            try:
+                if process.poll() is None:
+                    process.terminate()
+            except (OSError, subprocess.SubprocessError):
+                logging.getLogger("radiostudio").debug(
+                    "Falha ao interromper encoder após erro de saída", exc_info=True)
+
+    def _enqueue_encoded(self, data: bytes, network_queue=None, process=None) -> bool:
+        target_queue = self.network_queue if network_queue is None else network_queue
+        try:
+            target_queue.put_nowait(data)
+        except queue.Full:
+            self.dropped_encoded_chunks += 1
+            self._signal_connection_failure(
+                "A rede não acompanhou o encoder; reconectando para evitar atraso acumulado.",
+                process)
+            return False
+        self.max_network_queue_depth = max(
+            self.max_network_queue_depth, target_queue.qsize())
+        return True
 
     def _run(self):
         first_attempt = True
+        failed_attempts = 0
         while not self.stop_event.is_set():
+            attempt_started = time.monotonic()
+            if not first_attempt:
+                self._discard_queued_pcm()
             self.connection_failed.clear()
             self._status("Conectando" if first_attempt else "Reconectando")
             try:
@@ -416,17 +623,28 @@ class EncoderOutput:
                 if self.stop_event.is_set():
                     break
                 ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
-                cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "s16le",
+                cmd = [ffmpeg, "-hide_banner", "-loglevel", "error",
+                       # Input format, rate and channels are fixed PCM; probing
+                       # for several seconds only delays the first live MP3.
+                       "-probesize", "32", "-analyzeduration", "0",
+                       "-f", "s16le",
                        "-ar", str(SAMPLE_RATE), "-ac", str(CHANNELS), "-i", "pipe:0",
                        "-c:a", "libmp3lame", "-b:a", f"{self.bitrate}k",
+                       "-compression_level", str(self.encoder_quality), "-flush_packets", "1",
                        "-id3v2_version", "0", "-write_xing", "0", "-f", "mp3", "pipe:1"]
                 self.process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                                 stderr=subprocess.DEVNULL,
                                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
                 if self.stop_event.is_set():
                     break
+                self.network_queue = queue.Queue(maxsize=encoded_queue_capacity(self.bitrate))
+                self.reader_thread = threading.Thread(
+                    target=self._read_encoded, args=(self.process, self.network_queue), daemon=True)
+                self.writer_thread = threading.Thread(
+                    target=self._publish_encoded, args=(self.process, self.network_queue), daemon=True)
+                self.reader_thread.start()
+                self.writer_thread.start()
                 self._status("Ativo")
-                threading.Thread(target=self._read_encoded, daemon=True).start()
                 while not self.stop_event.is_set() and not self.connection_failed.is_set():
                     try:
                         data = self.queue.get(timeout=0.2)
@@ -444,7 +662,13 @@ class EncoderOutput:
             finally:
                 self._close_connection()
             first_attempt = False
-            self.stop_event.wait(5)
+            if self.stop_event.is_set():
+                break
+            if time.monotonic() - attempt_started >= 30.0:
+                failed_attempts = 0
+            else:
+                failed_attempts += 1
+            self.stop_event.wait(reconnect_delay(failed_attempts))
         self._status("Parado")
 
     def _close_connection(self):
@@ -466,21 +690,59 @@ class EncoderOutput:
                         process.stdin.close()
                     except OSError:
                         pass
+        writer = self.writer_thread
+        if writer and writer.is_alive() and writer is not threading.current_thread():
+            writer.join(timeout=0.25)
         if isinstance(self.destination, RemoteSink):
-            self.destination.close()
+            self.destination.close(graceful=not (writer and writer.is_alive()))
+        for thread in (self.reader_thread, self.writer_thread):
+            if thread and thread.is_alive() and thread is not threading.current_thread():
+                thread.join(timeout=0.5)
+        if process:
+            for stream in (process.stdout, process.stderr):
+                if stream:
+                    try:
+                        stream.close()
+                    except OSError:
+                        pass
+        self._discard_queued_encoded()
+        self.reader_thread = None
+        self.writer_thread = None
 
-    def _read_encoded(self):
-        process = self.process
+    def _read_encoded(self, process, network_queue):
         try:
             while not self.stop_event.is_set():
-                data = process.stdout.read(4096)
+                data = process.stdout.read(ENCODED_CHUNK_BYTES)
                 if not data:
                     break
-                self.destination.publish(data)
+                if self.connection_failed.is_set():
+                    break
+                if not self._enqueue_encoded(data, network_queue, process):
+                    break
         except Exception as exc:
             if not self.stop_event.is_set():
-                self.error = str(exc)
-                self.connection_failed.set()
+                self._signal_connection_failure(exc, process)
+
+    def _publish_encoded(self, process, network_queue):
+        while not self.stop_event.is_set() and not self.connection_failed.is_set():
+            try:
+                data = network_queue.get(timeout=0.2)
+            except queue.Empty:
+                if process.poll() is not None:
+                    return
+                continue
+            try:
+                started = time.monotonic()
+                self.destination.publish(data)
+                elapsed_ms = (time.monotonic() - started) * 1000
+                self.max_publish_ms = max(self.max_publish_ms, elapsed_ms)
+                if elapsed_ms >= 100:
+                    self.slow_publish_count += 1
+            except Exception as exc:
+                self.dropped_encoded_chunks += 1
+                if not self.stop_event.is_set():
+                    self._signal_connection_failure(exc, process)
+                return
 
     def stop(self):
         self.stop_event.set()
@@ -523,6 +785,22 @@ class BroadcastManager:
         with self.sources_lock:
             self.sources.pop(source, None)
 
+    def clear_source(self, source: str, *, preserve_primed: bool = False):
+        with self.sources_lock:
+            current = self.sources.get(source)
+            if current:
+                current[0].clear(preserve_primed=preserve_primed)
+
+    def promote_source(self, incoming: str, active: str):
+        """Promote a crossfaded source while discarding the outgoing tail."""
+        if incoming == active:
+            return
+        with self.sources_lock:
+            promoted = self.sources.pop(incoming, None)
+            self.sources.pop(active, None)
+            if promoted is not None:
+                self.sources[active] = promoted
+
     def start(self, profiles: list[dict], local: dict):
         if self.running:
             return
@@ -551,13 +829,17 @@ class BroadcastManager:
                                               local.get("station", "RadioStudio Python"),
                                               local.get("genre", ""), local.get("url", ""),
                                               local.get("description", ""))
-            targets.append(EncoderOutput("Servidor embutido", int(local.get("bitrate", 128)),
-                                         local_server))
+            local_server.diagnostics_provider = getattr(self, "diagnostics_snapshot", None)
+            targets.append(EncoderOutput(
+                "Servidor embutido", int(local.get("bitrate", 192)), local_server,
+                encoder_quality=local.get("encoder_quality", 2)))
         for profile in profiles:
             if not profile.get("enabled") or profile["id"] not in credentials:
                 continue
-            targets.append(EncoderOutput(profile["name"], int(profile["bitrate"]),
-                                         RemoteSink(profile, credentials[profile["id"]])))
+            targets.append(EncoderOutput(
+                profile["name"], int(profile["bitrate"]),
+                RemoteSink(profile, credentials[profile["id"]]),
+                encoder_quality=profile.get("encoder_quality", 2)))
         if not targets:
             missing = [f"{profile.get('name', profile_id)}: {message}"
                        for profile_id, message in startup_errors.items()
@@ -610,22 +892,62 @@ class BroadcastManager:
     def _mix_loop(self):
         deadline = time.monotonic()
         while not self.stop_event.is_set():
-            with self.sources_lock:
-                sources = list(self.sources.values())
-            mixed = [0] * (PCM_BYTES_PER_FRAME // 2)
-            for buffer, gain in sources:
-                samples = array("h")
-                samples.frombytes(buffer.take(PCM_BYTES_PER_FRAME))
-                for i, sample in enumerate(samples):
-                    mixed[i] += int(sample * gain)
+            mixed = self._mix_source_samples()
             pcm = array("h", (max(-32768, min(32767, value)) for value in mixed)).tobytes()
-            for output in tuple(self.outputs):
-                if output.status != "Falha":
-                    output.feed(pcm)
+            self._feed_outputs(pcm)
             deadline += FRAME_MS / 1000
             self.stop_event.wait(max(0, deadline - time.monotonic()))
             if time.monotonic() - deadline > 0.5:
                 deadline = time.monotonic()
+
+    def _mix_source_samples(self):
+        """Read each source independently so one broken component is isolated."""
+        with self.sources_lock:
+            sources = list(self.sources.items())
+        mixed = [0] * (PCM_BYTES_PER_FRAME // 2)
+        for source_name, (buffer, gain) in sources:
+            samples = array("h")
+            try:
+                samples.frombytes(buffer.take(PCM_BYTES_PER_FRAME))
+                if len(samples) != len(mixed):
+                    raise ValueError("A fonte retornou um quadro PCM com tamanho inválido")
+                for index, sample in enumerate(samples):
+                    mixed[index] += int(sample * gain)
+            except Exception:
+                with self.sources_lock:
+                    current = self.sources.get(source_name)
+                    if current and current[0] is buffer:
+                        self.sources.pop(source_name, None)
+                logging.getLogger("radiostudio").exception(
+                    "Falha ao ler a fonte de áudio %s; fonte removida do mixer",
+                    source_name)
+        return mixed
+
+    def _feed_outputs(self, pcm: bytes):
+        """A failing output reconnects independently without stopping other streams."""
+        for output in tuple(self.outputs):
+            if output.status == "Falha":
+                continue
+            try:
+                output.feed(pcm)
+            except Exception as exc:
+                logging.getLogger("radiostudio").exception(
+                    "Falha isolada no envio de áudio para %s",
+                    getattr(output, "name", "saída"))
+                reason = f"Falha ao entregar áudio ao encoder: {exc}"
+                try:
+                    output._signal_connection_failure(reason)
+                except Exception:
+                    logging.getLogger("radiostudio").exception(
+                        "Falha ao interromper a saída %s após erro",
+                        getattr(output, "name", "saída"))
+                    try:
+                        output.connection_failed.set()
+                        output.status = "Falha"
+                        output.error = reason
+                    except Exception:
+                        logging.getLogger("radiostudio").exception(
+                            "Falha ao isolar a saída de áudio")
 
     def stop(self):
         self.stop_event.set()

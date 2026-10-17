@@ -5,6 +5,10 @@ import tempfile
 import uuid
 from pathlib import Path
 
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QPixmap
+from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QLabel, QVBoxLayout)
+
 from ._shared import *
 from .event_dialog import EventDialog
 from .playlist_table import PlaylistTable
@@ -25,6 +29,9 @@ from .preview_player_dialog import PreviewPlayerDialog
 from ..services.music_library import MusicLibrary
 from ..services.audio_inputs import AudioInputController, INPUT_CHANNELS
 from ..services.transition_analysis import TransitionAnalyzer
+from ..services.audio_decode_fallback import AudioDecodeFallback
+from ..config import ABOUT_LOGO_FILE
+from .icons import app_icon, apply_app_icon
 
 
 class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControllerMixin,
@@ -100,6 +107,8 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         self.mix_progress_timer = None
         self.pending_transition_action = None
         self.pending_transition_kind = None
+        self._media_end_generation = 0
+        self._pending_media_end = None
         self.mix_failed_key = None
         self.silence_ms = 0
         self.stop_pending = False
@@ -108,6 +117,9 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         self.last_position_save_at = 0.0
         self.is_quitting = False
         self.tray_icon = None
+        self.audio_decode_fallback = AudioDecodeFallback(self)
+        self.decoded_audio_sources = {}
+        self.audio_fallback_attempts = {}
         self.player = QMediaPlayer(self)
         self.player_slot_a = self.player
         self.audio = QAudioOutput(self)
@@ -483,13 +495,48 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
 
     @guarded
     def show_about(self):
-        QMessageBox.about(self, f"Sobre o {APP_DISPLAY_NAME}",
-                          f"{APP_DISPLAY_NAME}\nAutomação de áudio, playlist e transmissão.\n\n"
-                          "Desenvolvido por Raphael Cherfem Carlini\n© 2026 Raemi Labs")
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Sobre o {APP_DISPLAY_NAME}")
+        apply_app_icon(dialog)
+        dialog.setMinimumWidth(500)
+        layout = QVBoxLayout(dialog)
+        layout.setSpacing(12)
+
+        logo = QLabel()
+        logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        pixmap = QPixmap(str(ABOUT_LOGO_FILE))
+        if not pixmap.isNull():
+            logo.setPixmap(pixmap.scaled(460, 150, Qt.AspectRatioMode.KeepAspectRatio,
+                                         Qt.TransformationMode.SmoothTransformation))
+            logo.setStyleSheet("background-color: #f3f6fa; border-radius: 6px; padding: 6px;")
+            layout.addWidget(logo)
+
+        details = QLabel(
+            f"<b>{APP_DISPLAY_NAME}</b><br>"
+            "Automação de áudio, playlist e transmissão.<br><br>"
+            "Desenvolvido por Raemi Labs<br>"
+            "Autor: Raphael Cherfem Carlini<br>"
+            "© 2026 Raemi Labs<br><br>"
+            "<b>Idioma:</b> disponível somente em Português nesta versão.<br>"
+            "<b>Relatar bugs:</b> "
+            "<a href=\"mailto:raphael@raemi.xyz\">raphael@raemi.xyz</a>"
+        )
+        details.setTextFormat(Qt.TextFormat.RichText)
+        details.setOpenExternalLinks(True)
+        details.setWordWrap(True)
+        layout.addWidget(details)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(dialog.accept)
+        buttons.accepted.connect(dialog.accept)
+        layout.addWidget(buttons)
+        dialog.exec()
 
     @guarded
     def setup_tray(self):
-        icon = self.style().standardIcon(QStyle.SP_MediaPlay)
+        icon = app_icon()
+        if icon.isNull():
+            icon = self.style().standardIcon(QStyle.SP_MediaPlay)
         self.setWindowIcon(icon)
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return

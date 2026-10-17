@@ -52,9 +52,40 @@ class CartWallMixin:
         buffer_output.audioBufferReceived.connect(
             lambda buffer, key=source_id: self.forward_buffer(key, buffer, 0.8))
         player.setAudioBufferOutput(buffer_output)
-        player.setSource(QUrl.fromLocalFile(path))
         self.cart_players.append((player, output, buffer_output, source_id))
-        player.mediaStatusChanged.connect(lambda status, p=player: self.release_cart(p) if status in (QMediaPlayer.EndOfMedia, QMediaPlayer.InvalidMedia) else None)
+        player.mediaStatusChanged.connect(
+            lambda status, p=player, original=path:
+            self.cart_media_status_changed(p, original, status))
+        player.setSource(QUrl.fromLocalFile(path))
+        player.play()
+
+    @guarded
+    def cart_media_status_changed(self, player, source, status):
+        if status == QMediaPlayer.InvalidMedia:
+            if self.try_decode_fallback(
+                    player, source,
+                    lambda original, decoded, error: self.cart_decode_fallback_ready(
+                        player, original, decoded, error)):
+                self.log_event("info", f"Preparando cart para compatibilidade: {Path(source).name}")
+                return
+            self.log_event("error", f"Não foi possível reproduzir o cart: {source}")
+            self.release_cart(player)
+        elif status == QMediaPlayer.EndOfMedia:
+            self.release_cart(player)
+
+    @guarded
+    def cart_decode_fallback_ready(self, player, source, decoded_path, error):
+        if (not any(entry[0] is player for entry in self.cart_players)
+                or player.source().toLocalFile() != source):
+            if decoded_path:
+                self.audio_decode_fallback.release(decoded_path, delay_ms=0)
+            return
+        if not decoded_path:
+            self.log_event("error", f"Não foi possível decodificar o cart: {error}")
+            self.release_cart(player)
+            return
+        self.decoded_audio_sources[player] = (source, decoded_path)
+        player.setSource(QUrl.fromLocalFile(decoded_path))
         player.play()
 
     @guarded
@@ -63,8 +94,12 @@ class CartWallMixin:
             if p == player:
                 self.broadcast.remove_source(source_id)
                 p.stop()
+                p.setSource(QUrl())
                 buffer_output.deleteLater()
                 output.deleteLater()
+        self.audio_decode_fallback.cancel(player)
+        self.release_decoded_media(player)
+        self.audio_fallback_attempts.pop(player, None)
         self.cart_players = [entry for entry in self.cart_players if entry[0] != player]
         player.deleteLater()
 

@@ -56,11 +56,13 @@ class AudioPipelineMixin:
             return
         active = player is self.player
         if active and player.playbackState() == QMediaPlayer.PlayingState:
-            self.on_air.feed_audio_buffer(buffer)
-            self.detect_trailing_silence(buffer)
             # master_volume belongs to local monitoring. Keep the program feed at
             # unity and apply only transition/ducking gains before transmission.
+            # Queue PCM before non-essential waveform/silence analysis so an
+            # expensive UI update cannot delay this source's audio buffer.
             self.forward_buffer("main", buffer, self.main_gain)
+            self.detect_trailing_silence(buffer)
+            self.on_air.feed_audio_buffer(buffer)
         elif (player is self.mix_player
               and player.playbackState() == QMediaPlayer.PlayingState
               and self.player.playbackState() != QMediaPlayer.PausedState):

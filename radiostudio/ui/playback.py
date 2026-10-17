@@ -8,10 +8,138 @@ from ..services.transition_analysis import (
 
 
 class PlaybackMixin:
+    def cancel_pending_media_end(self):
+        self._media_end_generation = getattr(self, "_media_end_generation", 0) + 1
+        self._pending_media_end = None
+
+    @guarded
+    def schedule_media_end_transition(self):
+        if (self.stop_pending or self.is_quitting
+                or getattr(self, "_pending_media_end", None) is not None
+                or not 0 <= self.current_index < len(self.tracks)):
+            return
+        path = self.tracks[self.current_index]
+        generation = getattr(self, "_media_end_generation", 0) + 1
+        self._media_end_generation = generation
+        pending = (generation, self.current_index, path)
+        self._pending_media_end = pending
+        QTimer.singleShot(0, lambda expected=pending: self.finish_media_end_transition(expected))
+
+    @guarded
+    def finish_media_end_transition(self, expected):
+        if getattr(self, "_pending_media_end", None) != expected:
+            return
+        self._pending_media_end = None
+        _generation, index, path = expected
+        if (self.is_quitting or self.stop_pending or index != self.current_index
+                or not 0 <= index < len(self.tracks) or self.tracks[index] != path
+                or self.original_media_path(self.player) != path):
+            return
+        if (self.mix_target_index >= 0
+                and self.mix_player.playbackState() == QMediaPlayer.PlayingState):
+            self.promote_mix_player()
+        else:
+            self.next_track()
+
+    @guarded
+    def shutdown_audio_fallback(self):
+        for player in (self.player, self.mix_player):
+            self.audio_decode_fallback.cancel(player)
+            player.stop()
+            player.setSource(QUrl())
+            self.release_decoded_media(player)
+            self.audio_fallback_attempts.pop(player, None)
+        self.audio_decode_fallback.shutdown()
+
+    def original_media_path(self, player):
+        decoded = self.decoded_audio_sources.get(player)
+        current = player.source().toLocalFile()
+        if decoded and current == decoded[1]:
+            return decoded[0]
+        return current
+
+    def release_decoded_media(self, player):
+        decoded = self.decoded_audio_sources.pop(player, None)
+        if decoded:
+            self.audio_decode_fallback.release(decoded[1])
+
+    def set_media_source(self, player, path):
+        self.audio_decode_fallback.cancel(player)
+        self.release_decoded_media(player)
+        self.audio_fallback_attempts.pop(player, None)
+        source_id = ("main" if player is self.player else
+                     "mix" if player is self.mix_player else None)
+        if source_id == "main":
+            self.broadcast.clear_source(source_id, preserve_primed=True)
+        elif source_id:
+            self.broadcast.remove_source(source_id)
+        player.setSource(QUrl.fromLocalFile(path))
+
+    def try_decode_fallback(self, player, path, callback):
+        decoded = self.decoded_audio_sources.get(player)
+        if decoded and player.source().toLocalFile() == decoded[1]:
+            return False
+        if self.audio_fallback_attempts.get(player) == path:
+            return self.audio_decode_fallback.is_pending(player)
+        self.audio_fallback_attempts[player] = path
+        if not Path(path).is_file():
+            return False
+        callback_called = False
+
+        def completed(source, decoded_path, error):
+            nonlocal callback_called
+            callback_called = True
+            callback(source, decoded_path, error)
+
+        started = self.audio_decode_fallback.convert(player, path, completed)
+        # A setup failure can complete synchronously. Treat the callback as
+        # handled so InvalidMedia does not schedule the next track twice.
+        return bool(started or callback_called)
+
+    @guarded
+    def main_decode_fallback_ready(self, player, source, decoded_path, error):
+        if (self.is_quitting or player is not self.player
+                or not 0 <= self.current_index < len(self.tracks)
+                or self.tracks[self.current_index] != source
+                or player.source().toLocalFile() != source):
+            if decoded_path:
+                self.audio_decode_fallback.release(decoded_path, delay_ms=0)
+            return
+        if not decoded_path:
+            self.handle_invalid_main_media(source, error)
+            return
+        self.decoded_audio_sources[player] = (source, decoded_path)
+        self.log_event("info", f"Decodificando formato compatível: {Path(source).name}")
+        self.statusBar().showMessage(f"Preparando áudio: {Path(source).name}")
+        self.broadcast.remove_source("main")
+        player.setSource(QUrl.fromLocalFile(decoded_path))
+        player.play()
+
+    @guarded
+    def mix_decode_fallback_ready(self, player, source, decoded_path, error):
+        index = self.mix_target_index
+        if (self.is_quitting or player is not self.mix_player or index < 0
+                or not 0 <= index < len(self.tracks) or self.tracks[index] != source
+                or player.source().toLocalFile() != source):
+            if decoded_path:
+                self.audio_decode_fallback.release(decoded_path, delay_ms=0)
+            return
+        if not decoded_path:
+            self.mix_failed_key = (self.current_index, str(source))
+            self.log_event("error", f"Não foi possível decodificar o Mix: {error}")
+            self.cancel_mix()
+            return
+        self.decoded_audio_sources[player] = (source, decoded_path)
+        self.log_event("info", f"Preparando Mix com FFmpeg: {Path(source).name}")
+        self.broadcast.remove_source("mix")
+        player.setSource(QUrl.fromLocalFile(decoded_path))
+        player.play()
+
     @guarded
     def seek_main_player(self, position_ms):
         if self.mix_target_index >= 0 or self.stop_pending:
             self.cancel_pending_transition()
+        self.broadcast.clear_source("main", preserve_primed=True)
         self.player.setPosition(max(0, int(position_ms)))
 
     @guarded
@@ -23,6 +151,7 @@ class PlaybackMixin:
             QMessageBox.warning(self, "Arquivo ausente", path)
             return
 
+        self.cancel_pending_media_end()
         fade_out_duration = self.automatic_fade_out_ms()
         if (not immediate and index != self.current_index and fade_out_duration
                 and self.player.playbackState() == QMediaPlayer.PlayingState):
@@ -64,7 +193,7 @@ class PlaybackMixin:
             if self.auto_transitions_enabled and not resume_position_ms else 0)
         self.main_gain = 0.0 if self.fade_in_pending_ms else 1.0
         self.apply_main_volume()
-        self.player.setSource(QUrl.fromLocalFile(path))
+        self.set_media_source(self.player, path)
         self.pending_resume_position = max(0, int(resume_position_ms)) or None
         metadata = read_track_metadata(path)
         self.pending_track_log = metadata.display_title
@@ -137,6 +266,7 @@ class PlaybackMixin:
 
     @guarded
     def finish_stop(self):
+        self.cancel_pending_media_end()
         self.cancel_transition_action()
         self.stop_pending = False
         self.pending_track_log = None
@@ -147,7 +277,11 @@ class PlaybackMixin:
         self.gain_ramps.clear()
         self.gain_paused_at = None
         self.gain_timer.stop()
+        self.audio_decode_fallback.cancel(self.player)
         self.player.stop()
+        self.broadcast.remove_source("main")
+        self.release_decoded_media(self.player)
+        self.audio_fallback_attempts.pop(self.player, None)
         self.main_gain = 1.0
         self.apply_main_volume()
         self.on_air.clear_track()
@@ -156,6 +290,7 @@ class PlaybackMixin:
 
     @guarded
     def next_track(self):
+        self.cancel_pending_media_end()
         interrupting_fade = self.pending_transition_kind in ("advance", "stop")
         self.cancel_transition_action()
         self.stop_pending = False
@@ -204,33 +339,42 @@ class PlaybackMixin:
     @guarded
     def media_status_changed(self, status):
         if status == QMediaPlayer.EndOfMedia:
-            if self.stop_pending:
-                return
-            if self.mix_target_index >= 0 and self.mix_player.playbackState() == QMediaPlayer.PlayingState:
-                self.promote_mix_player()
-            else:
-                self.next_track()
+            self.schedule_media_end_transition()
         elif status == QMediaPlayer.InvalidMedia:
-            path = self.player.source().toLocalFile()
-            self.fade_in_pending_ms = 0
-            self.gain_ramps.pop("main", None)
-            if not self.gain_ramps:
-                self.gain_timer.stop()
-            self.main_gain = 1.0
-            self.apply_main_volume()
-            self.pending_track_log = None
-            self.pending_resume_position = None
-            self.on_air.clear_track()
-            message = f"Não foi possível reproduzir: {path or 'arquivo desconhecido'}"
-            self.statusBar().showMessage(message)
-            self.log_event("error", message)
-            self.last_playback["was_playing"] = False
-            if not self.is_quitting:
-                self.save_state()
-                QTimer.singleShot(0, self.next_track)
+            path = self.original_media_path(self.player)
+            if self.try_decode_fallback(
+                    self.player, path,
+                    lambda source, decoded, error: self.main_decode_fallback_ready(
+                        self.player, source, decoded, error)):
+                if self.audio_decode_fallback.is_pending(self.player):
+                    self.log_event("info", f"Preparando áudio para compatibilidade: {Path(path).name}")
+                    self.statusBar().showMessage(f"Preparando áudio: {Path(path).name}")
+                return
+            self.handle_invalid_main_media(path)
         elif status in (QMediaPlayer.LoadedMedia, QMediaPlayer.BufferedMedia):
             self.apply_pending_resume_position()
             self.apply_pending_main_cue()
+
+    @guarded
+    def handle_invalid_main_media(self, path, fallback_error=""):
+        self.fade_in_pending_ms = 0
+        self.gain_ramps.pop("main", None)
+        if not self.gain_ramps:
+            self.gain_timer.stop()
+        self.main_gain = 1.0
+        self.apply_main_volume()
+        self.pending_track_log = None
+        self.pending_resume_position = None
+        self.on_air.clear_track()
+        message = f"Não foi possível reproduzir: {path or 'arquivo desconhecido'}"
+        if fallback_error:
+            message += f" ({fallback_error})"
+        self.statusBar().showMessage(message)
+        self.log_event("error", message)
+        self.last_playback["was_playing"] = False
+        if not self.is_quitting:
+            self.save_state()
+            QTimer.singleShot(0, self.next_track)
 
     @guarded
     def advance_after_fade(self, next_index):
@@ -250,7 +394,7 @@ class PlaybackMixin:
     def playback_state_changed(self, state):
         if state == QMediaPlayer.PlayingState and self.pending_track_log:
             self.log_event("music", self.pending_track_log)
-            self.record_track_started(self.player.source().toLocalFile())
+            self.record_track_started(self.original_media_path(self.player))
             self.pending_track_log = None
         if not self.is_quitting:
             self.save_state()
@@ -263,7 +407,14 @@ class PlaybackMixin:
                 self.apply_pending_main_cue()
                 self.begin_main_fade_in()
         elif player is self.mix_player and status == QMediaPlayer.InvalidMedia:
-            path = player.source().toLocalFile()
+            path = self.original_media_path(player)
+            if self.try_decode_fallback(
+                    player, path,
+                    lambda source, decoded, error: self.mix_decode_fallback_ready(
+                        player, source, decoded, error)):
+                if self.audio_decode_fallback.is_pending(player):
+                    self.log_event("info", f"Preparando Mix para compatibilidade: {Path(path).name}")
+                return
             self.mix_failed_key = (self.current_index, str(path))
             self.log_event("error", f"Não foi possível preparar o Mix: {path}")
             self.cancel_mix()
@@ -505,7 +656,7 @@ class PlaybackMixin:
         self.mix_cue_ms = max(0, int(cue_ms or 0))
         self.mix_gain = 0.0
         self.mix_audio.setVolume(0.0)
-        self.mix_player.setSource(QUrl.fromLocalFile(path))
+        self.set_media_source(self.mix_player, path)
         if self.mix_target_index != self.current_index + 1:
             return
         self.mix_player.play()
@@ -556,7 +707,7 @@ class PlaybackMixin:
         self.apply_main_volume()
         self.mix_audio.setVolume(0.0)
         self.mix_player.stop()
-        self.broadcast.remove_source("mix")
+        self.broadcast.promote_source("mix", "main")
         metadata = read_track_metadata(self.tracks[self.current_index])
         self.pending_track_log = metadata.display_title
         self.on_air.show_track(metadata.display_title, self.tracks[self.current_index])
@@ -583,7 +734,10 @@ class PlaybackMixin:
         self.mix_cue_ms = 0
         self.gain_ramps.pop("mix", None)
         if hasattr(self, "mix_player"):
+            self.audio_decode_fallback.cancel(self.mix_player)
             self.mix_player.stop()
+            self.release_decoded_media(self.mix_player)
+            self.audio_fallback_attempts.pop(self.mix_player, None)
             self.broadcast.remove_source("mix")
             self.mix_gain = 0.0
             self.mix_audio.setVolume(0.0)

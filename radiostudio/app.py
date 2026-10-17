@@ -4,18 +4,43 @@ from __future__ import annotations
 
 import logging
 import sys
+import ctypes
+from PySide6.QtGui import QIcon
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from .config import APP_DIR, APP_DISPLAY_NAME, INSTANCE_NAME
+from .config import APP_DIR, APP_DISPLAY_NAME, APP_ICON_FILE, APP_NAME, INSTANCE_NAME
 from .runtime_safety import configure_exception_logging, guarded
 from .ui.main_window import RadioStudio
 
 
+def set_windows_app_id() -> None:
+    """Give the Windows taskbar an identity separate from the Python host."""
+    if sys.platform != "win32":
+        return
+    try:
+        shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+        set_app_id = shell32.SetCurrentProcessExplicitAppUserModelID
+        set_app_id.argtypes = [ctypes.c_wchar_p]
+        set_app_id.restype = ctypes.c_long
+        result = set_app_id("RaemiLabs.RadioStudioPython")
+        if result:
+            logging.getLogger("radiostudio").warning(
+                "Não foi possível definir a identidade do ícone na barra de tarefas (HRESULT 0x%08X)",
+                result & 0xFFFFFFFF)
+    except Exception:
+        logging.getLogger("radiostudio").exception(
+            "Falha ao definir a identidade do aplicativo na barra de tarefas")
+
+
 def main() -> int:
     configure_exception_logging(APP_DIR)
+    set_windows_app_id()
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    app.setApplicationName(APP_NAME)
+    app.setApplicationDisplayName(APP_DISPLAY_NAME)
+    app.setWindowIcon(QIcon(str(APP_ICON_FILE)))
     existing = QLocalSocket(app)
     existing.connectToServer(INSTANCE_NAME)
     if existing.waitForConnected(300):

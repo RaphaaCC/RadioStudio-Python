@@ -9,15 +9,21 @@ from PySide6.QtWidgets import (
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 
 from ..services.track_metadata import read_track_metadata
+from ..services.audio_decode_fallback import AudioDecodeFallback
 from ..runtime_safety import guarded
+from .icons import apply_app_icon
 
 
 class PreviewPlayerDialog(QDialog):
     def __init__(self, player: QMediaPlayer, audio: QAudioOutput, parent=None):
         super().__init__(parent)
+        apply_app_icon(self)
         self.player = player
         self.audio = audio
         self._seeking = False
+        self.audio_decode_fallback = AudioDecodeFallback(self)
+        self._decoded_path = ""
+        self._fallback_attempted_source = ""
         self.setWindowTitle("🎧 Pré-escuta")
         self.setMinimumWidth(430)
 
@@ -86,7 +92,13 @@ class PreviewPlayerDialog(QDialog):
         self.details_label.setText(details or Path(path).name)
         self.setWindowTitle(f"🎧 Pré-escuta — {metadata.title or Path(path).stem}")
         if self.player.source().toLocalFile() != path:
+            self.audio_decode_fallback.cancel(self.player)
+            old_decoded = self._decoded_path
+            self._decoded_path = ""
+            self._fallback_attempted_source = ""
             self.player.setSource(QUrl.fromLocalFile(path))
+            if old_decoded:
+                self.audio_decode_fallback.release(old_decoded)
             self.seek_slider.setRange(0, 0)
             self.position_label.setText("00:00")
             self.duration_label.setText("00:00")
@@ -101,10 +113,15 @@ class PreviewPlayerDialog(QDialog):
         if self.player.playbackState() == QMediaPlayer.PlayingState:
             self.player.pause()
         elif self.player.source().isValid():
+            if not self._decoded_path:
+                self._fallback_attempted_source = ""
             self.player.play()
 
     @guarded
     def stop(self) -> None:
+        self.audio_decode_fallback.cancel(self.player)
+        if not self._decoded_path:
+            self._fallback_attempted_source = ""
         self.player.stop()
         self.seek_slider.setValue(0)
         self.position_label.setText("00:00")
@@ -140,11 +157,44 @@ class PreviewPlayerDialog(QDialog):
     def update_media_status(self, status) -> None:
         if status == QMediaPlayer.EndOfMedia:
             self.status_label.setText("Faixa concluída")
+        elif status == QMediaPlayer.InvalidMedia:
+            source = self._decoded_path or self.player.source().toLocalFile()
+            if (not self._decoded_path and source
+                    and self._fallback_attempted_source != source):
+                self._fallback_attempted_source = source
+                self.status_label.setText("Preparando decodificação compatível…")
+                self.audio_decode_fallback.convert(
+                    self.player, source, self.decode_fallback_ready)
+            else:
+                self.status_label.setText(f"Formato não reproduzível: {Path(source).name}")
+
+    @guarded
+    def decode_fallback_ready(self, source, decoded_path, error) -> None:
+        if self.player.source().toLocalFile() != source:
+            if decoded_path:
+                self.audio_decode_fallback.release(decoded_path, delay_ms=0)
+            return
+        if not decoded_path:
+            self.status_label.setText(f"Não foi possível decodificar: {error}")
+            return
+        self._decoded_path = decoded_path
+        self.player.setSource(QUrl.fromLocalFile(decoded_path))
+        self.player.play()
 
     @guarded
     def show_error(self, _error, message: str) -> None:
         if message:
             self.status_label.setText(f"Erro na pré-escuta: {message}")
+
+    @guarded
+    def shutdown_fallback(self) -> None:
+        self.audio_decode_fallback.cancel(self.player)
+        self.player.stop()
+        self.player.setSource(QUrl())
+        if self._decoded_path:
+            self.audio_decode_fallback.release(self._decoded_path, delay_ms=0)
+            self._decoded_path = ""
+        self.audio_decode_fallback.shutdown()
 
     @staticmethod
     def _time_text(milliseconds: int) -> str:
@@ -154,4 +204,9 @@ class PreviewPlayerDialog(QDialog):
     @guarded
     def closeEvent(self, event) -> None:
         self.stop()
+        self.player.setSource(QUrl())
+        if self._decoded_path:
+            self.audio_decode_fallback.release(self._decoded_path, delay_ms=0)
+            self._decoded_path = ""
+        self.audio_decode_fallback.shutdown()
         super().closeEvent(event)

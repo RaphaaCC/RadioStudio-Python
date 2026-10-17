@@ -132,11 +132,11 @@ fila PCM aumenta
 descarte de frames se atingir 120
 ```
 
-### Hipótese B4 — scheduling Python/Qt/Windows
+### Hipótese B4 — scheduling e trabalho na thread Qt/Python
 
 **Confiança: média/baixa até medir**
 
-O mixer é uma thread Python que acorda em intervalos de 20 ms. Windows não é um sistema operacional hard real-time. GIL, carga de CPU, antivírus, outros threads e callbacks Qt podem introduzir jitter.
+O mixer é uma thread Python que acorda em intervalos de 20 ms. Windows não é um sistema operacional hard real-time. GIL, carga de CPU, antivírus, outros threads e callbacks Qt podem introduzir jitter. O callback de áudio também atualiza o visualizador e, opcionalmente, analisa silêncio. O PCM agora é enfileirado antes dessas tarefas; a atualização reativa foi limitada a 30 Hz, e estilos reativos deixaram de iniciar uma segunda decodificação integral da música para desenhar a forma estática. Isso reduz contenção potencial, mas não confirma essa hipótese como causa.
 
 O loop tenta compensar drift usando `time.monotonic()`, mas ainda depende do scheduler acordar próximo ao instante correto.
 
@@ -147,6 +147,12 @@ Isso pode ser irrelevante em máquinas tranquilas ou pode se tornar importante s
 ## Sintoma C — problema só aparece via Icecast, mas não na saída local
 
 Isso **não prova** que o Icecast é culpado.
+
+### Evidência de reconexão em loop (17/10/2026)
+
+A captura enviada mostra o mesmo perfil Icecast alternando entre `WinError 10053` e `Servidor encerrou a conexão` a cada poucos segundos. O código anterior enviava HTTP `PUT` com `Transfer-Encoding: chunked`. A documentação oficial registra que Icecast 2.4.2 não aceitava chunked encoding em PUT; o suporte foi acrescentado na série 2.5. O muxer Icecast do FFmpeg usa `Expect: 100-continue` e desativa chunked (`chunked_post=0`).
+
+Essa incompatibilidade é uma causa plausível e diretamente compatível com o ciclo mostrado, embora a versão do servidor do usuário não esteja confirmada. O RadioStudio agora usa `Expect: 100-continue` e envia MP3 bruto em HTTP PUT, sem chunk framing, seguindo a abordagem do FFmpeg. Referências: [Icecast 2.4.2](https://icecast.org/news/icecast-release-2_4_2/), [Icecast 2.5 beta2](https://icecast.org/news/icecast-release-2_5-beta2/) e [muxer Icecast do FFmpeg](https://ffmpeg.org/doxygen/8.1/icecast_8c_source.html).
 
 A saída local escutada pelo usuário usa `QAudioOutput`, enquanto a transmissão percorre:
 

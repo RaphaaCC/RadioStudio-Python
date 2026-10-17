@@ -9,12 +9,13 @@ from datetime import datetime
 from math import cos, floor, log10, pi, sin, sqrt
 from pathlib import Path
 import sys
+import time
 from collections import deque
 
 import imageio_ffmpeg
 from PySide6.QtCore import QProcess, Qt, QRectF, QTimer
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPalette, QPen
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 
 WEEKDAYS = ("Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom")
@@ -32,6 +33,9 @@ WAVEFORM_STYLES = (
     ("Espectro espelhado", "spectrum_mirror"),
     ("Curva de frequências", "spectrum_line"),
 )
+LIVE_WAVEFORM_STYLES = frozenset({"reactive_wave", "spectrum", "spectrum_mirror", "spectrum_line"})
+LIVE_WAVEFORM_MIN_INTERVAL = 1 / 30
+LIVE_SPECTRUM_MIN_INTERVAL = 1 / 15
 
 
 def minutes_seconds(milliseconds: int) -> str:
@@ -83,6 +87,8 @@ class Waveform(QWidget):
         self.live_spectrum = [0.0] * 48
         self._samples = deque(maxlen=4096)
         self._samples_since_spectrum = 0
+        self._last_reactive_update = 0.0
+        self._last_spectrum_update = 0.0
         self.setMinimumHeight(32)
 
     def set_levels(self, levels: list[float]):
@@ -94,6 +100,8 @@ class Waveform(QWidget):
         self.live_spectrum = [0.0] * len(self.live_spectrum)
         self._samples.clear()
         self._samples_since_spectrum = 0
+        self._last_reactive_update = 0.0
+        self._last_spectrum_update = 0.0
         self.update()
 
     @guarded
@@ -109,6 +117,8 @@ class Waveform(QWidget):
             self.live_spectrum = [0.0] * len(self.live_spectrum)
         self.style = style
         self._samples_since_spectrum = 0
+        self._last_reactive_update = 0.0
+        self._last_spectrum_update = 0.0
         self.update()
 
     @guarded
@@ -131,22 +141,38 @@ class Waveform(QWidget):
                                  (channels * 32768))
         self._samples.extend(frame_samples)
 
+        # Keep modal dialogs responsive by avoiding an optional transform
+        # while the visualizer is covered by a modal window.
+        application = QApplication.instance()
+        if application is not None and application.activeModalWidget() is not None:
+            return
+
         if self.style == "reactive_wave":
-            recent = list(self._samples)[-2048:]
-            count = 100
-            self.live_wave = []
-            for index in range(count):
-                start = index * len(recent) // count
-                end = max(start + 1, (index + 1) * len(recent) // count)
-                selected = recent[start:end]
-                peak = max((abs(value) for value in selected), default=0.0)
-                self.live_wave.append(min(1.0, peak * 1.6))
-            self.update()
+            now = time.monotonic()
+            if now - self._last_reactive_update >= LIVE_WAVEFORM_MIN_INTERVAL:
+                self._last_reactive_update = now
+                self._update_reactive_wave()
         elif self.style in ("spectrum", "spectrum_mirror", "spectrum_line"):
             self._samples_since_spectrum += frames
-            if len(self._samples) >= 2048 and self._samples_since_spectrum >= 2048:
+            now = time.monotonic()
+            if (len(self._samples) >= 2048 and self._samples_since_spectrum >= 2048
+                    and now - self._last_spectrum_update >= LIVE_SPECTRUM_MIN_INTERVAL):
                 self._samples_since_spectrum = 0
+                self._last_spectrum_update = now
                 self._update_spectrum(list(self._samples)[-2048:], sample_rate)
+
+    @guarded
+    def _update_reactive_wave(self):
+        recent = list(self._samples)[-2048:]
+        count = 100
+        self.live_wave = []
+        for index in range(count):
+            start = index * len(recent) // count
+            end = max(start + 1, (index + 1) * len(recent) // count)
+            selected = recent[start:end]
+            peak = max((abs(value) for value in selected), default=0.0)
+            self.live_wave.append(min(1.0, peak * 1.6))
+        self.update()
 
     @guarded
     def _update_spectrum(self, samples: list[float], sample_rate: int):
@@ -373,6 +399,7 @@ class OnAirPanel(QFrame):
         self._wave_overflow = False
         self._broadcast_active = False
         self._blink_red = False
+        self._track_path = ""
         self._blink_timer = QTimer(self)
         self._blink_timer.setInterval(500)
         self._blink_timer.timeout.connect(self._toggle_on_air_blink)
@@ -405,11 +432,27 @@ class OnAirPanel(QFrame):
     @guarded
     def show_track(self, title: str, path: str):
         self._cancel_analysis()
+        self._track_path = str(path)
         self.waveform.reset_live()
         self.title.setText(title)
         self.title.setToolTip(title)
         self.waveform.set_levels([])
         self.set_progress(0, 0)
+        if self.waveform.style in LIVE_WAVEFORM_STYLES:
+            return
+        self._start_waveform_analysis(path)
+
+    @guarded
+    def set_waveform_style(self, style: str):
+        self.waveform.set_style(style)
+        if style in LIVE_WAVEFORM_STYLES:
+            self._cancel_analysis()
+            self.waveform.set_levels([])
+        elif self._track_path:
+            self._start_waveform_analysis(self._track_path)
+
+    @guarded
+    def _start_waveform_analysis(self, path: str):
         try:
             ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
         except (OSError, RuntimeError):
@@ -427,6 +470,7 @@ class OnAirPanel(QFrame):
     @guarded
     def clear_track(self):
         self._cancel_analysis()
+        self._track_path = ""
         self.waveform.reset_live()
         self.title.setText("Nenhuma faixa em reprodução")
         self.title.setToolTip("")

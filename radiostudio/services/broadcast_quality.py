@@ -6,8 +6,9 @@ import time
 from array import array
 
 from .broadcast import (
+    ENCODED_CHUNK_BYTES,
+    ENCODED_QUEUE_MAX_MS,
     FRAME_MS,
-    PCM_BYTES_PER_FRAME,
     BroadcastManager as _BaseBroadcastManager,
 )
 
@@ -39,30 +40,56 @@ class BroadcastManager(_BaseBroadcastManager):
     def __init__(self):
         super().__init__()
         self.limiter_gain = 1.0
+        self.mixer_overruns = 0
+        self.mixer_max_lateness_ms = 0.0
 
     def start(self, profiles: list[dict], local: dict):
         self.limiter_gain = 1.0
+        self.mixer_overruns = 0
+        self.mixer_max_lateness_ms = 0.0
         return super().start(profiles, local)
 
     def _mix_loop(self):
         deadline = time.monotonic()
         while not self.stop_event.is_set():
-            with self.sources_lock:
-                sources = list(self.sources.values())
-            mixed = [0] * (PCM_BYTES_PER_FRAME // 2)
-            for buffer, gain in sources:
-                samples = array("h")
-                samples.frombytes(buffer.take(PCM_BYTES_PER_FRAME))
-                for index, sample in enumerate(samples):
-                    mixed[index] += int(sample * gain)
+            lateness_ms = max(0.0, (time.monotonic() - deadline) * 1000)
+            self.mixer_max_lateness_ms = max(self.mixer_max_lateness_ms, lateness_ms)
+            if lateness_ms >= FRAME_MS:
+                self.mixer_overruns += 1
+            mixed = self._mix_source_samples()
             pcm, self.limiter_gain = limit_mixed_samples(mixed, self.limiter_gain)
-            for output in tuple(self.outputs):
-                if output.status != "Falha":
-                    output.feed(pcm)
+            self._feed_outputs(pcm)
             deadline += FRAME_MS / 1000
             self.stop_event.wait(max(0, deadline - time.monotonic()))
             if time.monotonic() - deadline > 0.5:
                 deadline = time.monotonic()
+
+    def diagnostics_snapshot(self):
+        with self.sources_lock:
+            sources = list(self.sources.items())
+        outputs = tuple(self.outputs)
+        return {
+            "mixer": {"frame_ms": FRAME_MS, "overruns": self.mixer_overruns,
+                      "max_lateness_ms": round(self.mixer_max_lateness_ms, 2),
+                      "limiter_gain": round(self.limiter_gain, 4)},
+            "sources": {name: buffer.diagnostics_snapshot()
+                        for name, (buffer, _gain) in sources},
+            "outputs": [{"name": output.name, "status": output.status,
+                         "pcm_queue_ms": output.queue.qsize() * FRAME_MS,
+                         "pcm_queue_high_watermark_ms": output.max_pcm_queue_depth * FRAME_MS,
+                         "dropped_pcm_frames": output.dropped_pcm_frames,
+                         "encoded_queue_ms": round(
+                             output.network_queue.qsize() * ENCODED_CHUNK_BYTES * 8 /
+                             max(1, output.bitrate), 1),
+                         "encoded_queue_limit_ms": ENCODED_QUEUE_MAX_MS,
+                         "encoded_queue_high_watermark_ms": round(
+                             output.max_network_queue_depth * ENCODED_CHUNK_BYTES * 8 /
+                             max(1, output.bitrate), 1),
+                         "dropped_encoded_chunks": output.dropped_encoded_chunks,
+                         "max_network_write_ms": round(output.max_publish_ms, 2),
+                         "slow_network_writes": output.slow_publish_count}
+                        for output in outputs],
+        }
 
     def stop(self):
         try:

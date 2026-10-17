@@ -60,11 +60,13 @@ Mixer Python (20 ms)
   ↓
 Limiter
   ↓
-EncoderOutput.queue (max 120)
+EncoderOutput PCM queue (max 120 frames)
   ↓
 FFmpeg/libmp3lame
   ↓
-RemoteSink
+MP3 queue (max ~2 seconds; block count follows bitrate)
+  ↓
+network writer → RemoteSink
   ↓
 Icecast ou SHOUTcast
 ```
@@ -89,7 +91,7 @@ Prioridade:
 1. PCMBuffer.take() completando frame insuficiente com zeros
 2. jitter entre QAudioBufferOutput e mixer de 20 ms
 3. EncoderOutput.queue acumulando e descartando frame antigo ao lotar
-4. publish/sendall bloqueando com rede lenta
+4. publish/sendall bloqueando o network writer; a fila MP3 limitada agora aciona reconexão quando satura
 5. scheduling Python/Windows sob carga
 ```
 
@@ -103,9 +105,9 @@ Instrumentar temporariamente e responder primeiro:
 O PCM imediatamente antes do encoder está limpo?
 O MP3 imediatamente depois do FFmpeg está limpo?
 A fila chega a 120?
-Há frames descartados?
+Há frames PCM ou blocos MP3 descartados?
 Há zero-fill durante playback estável?
-Quanto tempo destination.publish() leva?
+Qual o tempo de escrita e a profundidade máxima das filas?
 ```
 
 ## Testes mínimos sugeridos

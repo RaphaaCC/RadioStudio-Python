@@ -11,11 +11,13 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                                QMessageBox, QPushButton, QTimeEdit)
 from ..config import AUDIO_FILTER
 from ..runtime_safety import guarded
+from .icons import apply_app_icon
 
 
 class EventDialog(QDialog):
     def __init__(self, parent=None, event=None):
         super().__init__(parent)
+        apply_app_icon(self)
         self.setWindowTitle("Evento agendado")
         self.path = event.get("path", "") if event else ""
         self.event_id = (event.get("id") if event and isinstance(event.get("id"), str)

@@ -15,6 +15,7 @@ from ..services.track_metadata import (DEFAULT_STATION_METADATA, PLACEHOLDERS, T
                             format_broadcast_title, unknown_placeholders)
 from .studio_widgets import WAVEFORM_STYLES
 from ..services.audio_inputs import INPUT_CHANNELS, INPUT_LABELS, audio_device_key
+from .icons import apply_app_icon
 
 
 def device_key(device: QAudioDevice) -> str:
@@ -44,6 +45,7 @@ class SettingsDialog(QDialog):
                  mic_music_level_percent: int = 35, dynamic_mic_duck: bool = False,
                  speech_music_level_percent: int = 20, speech_threshold_db: float = -38):
         super().__init__(parent)
+        apply_app_icon(self)
         self.setWindowTitle(f"Configurações — {APP_DISPLAY_NAME}")
         self.setMinimumWidth(560)
         layout = QVBoxLayout(self)

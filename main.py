@@ -1,6 +1,6 @@
 """Compatibility entry point; the application now lives in the radiostudio package."""
 
-from radiostudio.app import main
+from radiostudio.cli import main
 
 
 if __name__ == "__main__":

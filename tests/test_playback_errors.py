@@ -1,7 +1,9 @@
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
-from PySide6.QtCore import QCoreApplication
+from PySide6.QtCore import QCoreApplication, QUrl
 from PySide6.QtMultimedia import QMediaPlayer
 
 from radiostudio.ui.playback import PlaybackMixin
@@ -14,8 +16,15 @@ class _FakeSource:
 
 
 class _FakePlayer:
+    def __init__(self):
+        from PySide6.QtCore import QUrl
+        self._source = QUrl.fromLocalFile("bad-track.mp3")
+
     def source(self):
-        return _FakeSource()
+        return self._source
+
+    def setSource(self, source):
+        self._source = source
 
 
 class _FakeAudio:
@@ -82,13 +91,21 @@ class _AudioPipelineHarness(AudioPipelineMixin):
         self.master_volume = 1.0
         self.mix_gain = 1.0
         self.forwarded = []
+        self.events = []
+        self.on_air = type("OnAir", (), {"feed_audio_buffer":
+                                         lambda _self, _buffer: self.events.append("visualizer")})()
+        self.trim_silence = False
+        self.main_gain = 1.0
+        self.music_duck_gain = 1.0
 
     def forward_buffer(self, *args):
         self.forwarded.append(args)
+        self.events.append("broadcast")
 
 
 class _GainHarness(PlaybackMixin):
     def __init__(self):
+        self.broadcast = _FakeBroadcast()
         self.gain_ramps = {}
         self.gain_timer = _FakeTimer()
         self.main_gain = 1.0
@@ -112,9 +129,42 @@ class _FakeOnAir:
         pass
 
 
+class _FakeDecodeFallback:
+    def cancel(self, _player):
+        pass
+
+    def release(self, _path):
+        pass
+
+    def is_pending(self, _player):
+        return False
+
+
+class _SynchronousFailureFallback(_FakeDecodeFallback):
+    def convert(self, player, source, callback):
+        callback(source, "", "FFmpeg ausente")
+        return False
+
+
+class _FakeBroadcast:
+    def __init__(self):
+        self.removed_sources = []
+        self.cleared_sources = []
+
+    def remove_source(self, source):
+        self.removed_sources.append(source)
+
+    def clear_source(self, source, *, preserve_primed=False):
+        self.cleared_sources.append((source, preserve_primed))
+
+
 class _PlaybackHarness(PlaybackMixin):
     def __init__(self):
         self.player = _FakePlayer()
+        self.decoded_audio_sources = {}
+        self.audio_fallback_attempts = {}
+        self.audio_decode_fallback = _FakeDecodeFallback()
+        self.broadcast = _FakeBroadcast()
         self.gain_ramps = {}
         self.gain_timer = _FakeTimer()
         self.main_gain = 1.0
@@ -141,6 +191,9 @@ class _PlaybackHarness(PlaybackMixin):
     def next_track(self):
         self.next_calls += 1
 
+    def main_decode_fallback_ready(self, player, source, decoded, error):
+        PlaybackMixin.handle_invalid_main_media(self, source, error)
+
 
 class PlaybackErrorTests(unittest.TestCase):
     @classmethod
@@ -156,6 +209,69 @@ class PlaybackErrorTests(unittest.TestCase):
         self.assertTrue(player.error_messages)
         self.assertEqual(player.error_messages[0][0], "error")
         self.assertFalse(player.last_playback["was_playing"])
+
+    def test_synchronous_fallback_failure_only_advances_once(self):
+        player = _PlaybackHarness()
+        player.audio_decode_fallback = _SynchronousFailureFallback()
+        with tempfile.TemporaryDirectory(prefix="radiostudio-playback-test-") as folder:
+            source = Path(folder) / "bad-track.mp3"
+            source.write_bytes(b"invalid audio")
+            player.player.setSource(QUrl.fromLocalFile(str(source)))
+
+            PlaybackMixin.media_status_changed(player, QMediaPlayer.InvalidMedia)
+            self.app.processEvents()
+
+        self.assertEqual(player.next_calls, 1)
+        errors = [message for kind, message in player.error_messages if kind == "error"]
+        self.assertEqual(len(errors), 1)
+        self.assertIn("FFmpeg ausente", errors[0])
+
+    def test_end_of_media_transition_is_deferred_and_duplicate_signals_are_ignored(self):
+        player = _PlaybackHarness()
+        player.current_index = 0
+        player.tracks = ["bad-track.mp3", "next-track.mp3"]
+        player.mix_target_index = -1
+        player.stop_pending = False
+        player._media_end_generation = 0
+        player._pending_media_end = None
+        callbacks = []
+
+        with patch("radiostudio.ui.playback.QTimer.singleShot",
+                   side_effect=lambda _delay, callback: callbacks.append(callback)):
+            PlaybackMixin.media_status_changed(player, QMediaPlayer.EndOfMedia)
+            PlaybackMixin.media_status_changed(player, QMediaPlayer.EndOfMedia)
+
+        self.assertEqual(player.next_calls, 0)
+        self.assertEqual(len(callbacks), 1)
+        callbacks[0]()
+        self.assertEqual(player.next_calls, 1)
+
+    def test_end_of_media_callback_does_not_advance_a_newly_selected_track(self):
+        player = _PlaybackHarness()
+        player.current_index = 0
+        player.tracks = ["bad-track.mp3", "next-track.mp3"]
+        player.mix_target_index = -1
+        player.stop_pending = False
+        player._media_end_generation = 0
+        player._pending_media_end = None
+        callbacks = []
+
+        with patch("radiostudio.ui.playback.QTimer.singleShot",
+                   side_effect=lambda _delay, callback: callbacks.append(callback)):
+            PlaybackMixin.media_status_changed(player, QMediaPlayer.EndOfMedia)
+        player.current_index = 1
+        callbacks[0]()
+
+        self.assertEqual(player.next_calls, 0)
+
+    def test_changing_main_media_flushes_queued_audio_from_previous_track(self):
+        player = _PlaybackHarness()
+
+        PlaybackMixin.set_media_source(player, player.player, "next-track.mp3")
+
+        self.assertEqual(player.broadcast.cleared_sources, [("main", True)])
+        self.assertEqual(player.broadcast.removed_sources, [])
+        self.assertEqual(player.player.source().toLocalFile(), "next-track.mp3")
 
     def test_mix_gain_ramps_use_equal_power_curve(self):
         player = _GainHarness()
@@ -191,6 +307,14 @@ class PlaybackErrorTests(unittest.TestCase):
             player, player.mix_player, _ValidBuffer())
 
         self.assertEqual(player.forwarded, [])
+
+    def test_main_audio_is_queued_before_optional_waveform_work(self):
+        player = _AudioPipelineHarness()
+        player.player.state = QMediaPlayer.PlayingState
+
+        player.handle_player_audio_buffer(player.player, _ValidBuffer())
+
+        self.assertEqual(player.events, ["broadcast", "visualizer"])
 
     def test_late_mix_start_is_paused_when_main_deck_is_paused(self):
         player = _GainHarness()

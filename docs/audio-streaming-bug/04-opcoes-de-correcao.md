@@ -58,20 +58,18 @@ Maior uso de banda e possível aumento de CPU dependendo das opções escolhidas
 
 ---
 
-## Prioridade 4 — observabilidade de fila e drops
+## Prioridade 4 — observabilidade de fila e drops (adicionada)
 
-Hoje o `EncoderOutput.feed()` descarta o frame mais antigo quando a fila está cheia.
-
-Isso protege memória, mas esconde um problema importante.
-
-Adicionar métricas/eventos como:
+O `EncoderOutput.feed()` mantém a fila PCM limitada: se ela lotar, descarta o frame mais antigo. O endpoint local `/status.json` agora expõe métricas para localizar isso e o congestionamento depois do encoder:
 
 ```text
-encoder_queue_depth
-encoder_queue_high_watermark
-encoder_dropped_frames
-source_pcm_underruns
-socket_publish_duration_ms
+sources[*].underflow_frames
+sources[*].zero_filled_bytes
+outputs[*].pcm_queue_ms
+outputs[*].dropped_pcm_frames
+outputs[*].encoded_queue_ms
+outputs[*].dropped_encoded_chunks
+outputs[*].max_network_write_ms
 ```
 
 Essas métricas podem ficar apenas em log técnico, sem poluir a UI.
@@ -90,38 +88,26 @@ problema de rede
 
 ---
 
-## Prioridade 5 — desacoplar melhor encoder e rede
+## Prioridade 5 — política de congestionamento da rede
 
-Hoje a thread que lê o `stdout` do FFmpeg também chama `destination.publish()`.
-
-Se o socket bloquear, a leitura do encoder também para temporariamente.
+O `stdout` do FFmpeg agora é lido por uma thread e publicado por outra, através de uma fila MP3 limitada a aproximadamente 2 s, com a quantidade de blocos ajustada ao bitrate. Isso evita bloquear diretamente a leitura do encoder durante uma escrita lenta. Se a fila lotar, o programa reconecta para não acumular atraso sem limite. Enquanto a saída está conectando ou reconectando, frames PCM não são acumulados; a transmissão retoma com áudio ao vivo depois que o encoder fica pronto.
 
 ### Arquitetura possível
 
 ```text
-Mixer
-  ↓
-Fila PCM
-  ↓
-FFmpeg
-  ↓
-Fila MP3
-  ↓
-Writer de rede
-  ↓
-Icecast
+Mixer → fila PCM → FFmpeg → fila MP3 limitada → writer de rede → servidor
 ```
 
 Com filas separadas, o programa pode medir exatamente onde aparece congestionamento e aplicar política de recuperação específica.
 
 ### Decisões necessárias
 
-Quando a rede ficar lenta, escolher uma política clara:
+Se os diagnósticos mostrarem reconexões frequentes, revisar a política de congestionamento. A política atual prioriza tempo real:
 
-- tolerar atraso até um limite;
-- reconectar;
-- descartar áudio de forma controlada;
-- nunca deixar latência crescer indefinidamente.
+- limita a fila MP3 a aproximadamente 2 s (o tamanho varia com o bitrate);
+- reconecta quando ela lota;
+- descarta o backlog PCM durante a reconexão e não acumula novos frames enquanto o destino não está pronto;
+- não deixa a latência crescer indefinidamente.
 
 Para rádio ao vivo, geralmente é melhor preservar "tempo real" do que transmitir conteúdo vários segundos atrasado.
 
@@ -206,21 +192,24 @@ Não começar por aqui. É uma otimização arquitetural avançada depois de res
 
 # Estratégia recomendada de implementação
 
-Uma sequência conservadora seria:
+Estado desta implementação: a fase de instrumentação, os presets de encoding e a separação entre encoder e writer de rede foram adicionados. Foi reproduzido e corrigido um atraso de início no encoder: para o PCM bruto conhecido, a análise padrão de entrada do FFmpeg não é necessária; com `-probesize 32 -analyzeduration 0`, um teste sintético recebe MP3 antes de encerrar o pipe. A leitura em blocos de 1024 bytes também reduz a espera para formar cada lote. Uma falha de publicação ou fila MP3 cheia agora encerra o FFmpeg da saída, evitando que a escrita no stdin fique presa.
+
+A causa do swishing e a qualidade auditiva final continuam sem confirmação. Um ensaio local em tempo real com 10 s de ruído sintético, FFmpeg/libmp3lame em 320 kbps e qualidade 0 publicou 394.971 bytes, sem descartes PCM/MP3, com fila PCM máxima de 1 frame e fila MP3 máxima de 2 blocos; testes de 192 kbps/qualidade 2 com tom e de 320 kbps/qualidade 0 com ruído também encerraram os workers sem erro. Isso avalia o encoder e o writer falso na máquina de desenvolvimento, mas não mede jitter do Qt nem a rede. Como redução de contenção, o player agora enfileira PCM antes do trabalho do visualizador, limita a atualização da onda reativa a 30 Hz e evita a decodificação FFmpeg duplicada em estilos de visualização ao vivo. Essa mudança ainda não confirma a causa dos cortes. Ainda faltam capturas A/B da mesma faixa e um destino de transmissão real; não afirmar que a cadeia está livre de cortes sem essa validação.
+
+Próximos passos:
 
 ```text
 Fase 1
-- instrumentar underrun/fila
-- capturar PCM e MP3 pré-rede
-- confirmar causa
+- validar métricas em reprodução/transmissão longa e conferir se há underruns/drops em condições normais
+- comparar capturas PCM/MP3 pré-rede com a mesma faixa e destino para localizar swishing
 
 Fase 2
 - melhorar encoding/padrões de bitrate
 - corrigir underruns/jitter se comprovados
 
 Fase 3
-- separar encoder da escrita de rede
-- melhorar política de congestionamento
+- avaliar os dados da fila MP3 limitada e frequência de reconexões
+- ajustar política de congestionamento caso haja evidência
 
 Fase 4
 - mixer float/AAC opcional

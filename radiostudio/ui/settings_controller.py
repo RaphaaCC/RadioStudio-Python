@@ -41,7 +41,7 @@ class SettingsControllerMixin:
          self.speech_music_level_percent, self.speech_threshold_db) = dialog.values()
         self.set_player_controls_position(controls_position)
         self.waveform_style = waveform_style
-        self.on_air.waveform.set_style(waveform_style)
+        self.on_air.set_waveform_style(waveform_style)
         if self.auto_transitions_enabled and 0 <= self.current_index < len(self.tracks):
             self.request_transition_analysis(self.tracks[self.current_index])
             if self.current_index + 1 < len(self.tracks):

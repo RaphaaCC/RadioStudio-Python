@@ -13,7 +13,9 @@ from PySide6.QtWidgets import (
     QScrollArea, QSpinBox, QTabWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from ..services.broadcast import PortInUseError, SETTINGS_DIR, delete_password, new_profile, set_password
+from ..services.broadcast import (ENCODER_QUALITY_PRESETS, PortInUseError, SETTINGS_DIR,
+                                  delete_password, new_profile, set_password)
+from .icons import apply_app_icon
 
 
 def spin(low: int, high: int, value: int) -> QSpinBox:
@@ -26,7 +28,7 @@ def spin(low: int, high: int, value: int) -> QSpinBox:
 def bounded_int(value, default: int, low: int, high: int) -> int:
     try:
         parsed = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         parsed = default
     return min(high, max(low, parsed))
 
@@ -34,6 +36,7 @@ def bounded_int(value, default: int, low: int, high: int) -> int:
 class ProfileDialog(QDialog):
     def __init__(self, parent=None, profile=None):
         super().__init__(parent)
+        apply_app_icon(self)
         self.profile = dict(profile or new_profile())
         self.setWindowTitle("Saída de transmissão")
         self.resize(620, 600)
@@ -132,9 +135,18 @@ class ProfileDialog(QDialog):
         stream_layout.setContentsMargins(8, 10, 8, 8)
         stream_form = QFormLayout()
         stream_form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
-        self.bitrate = spin(32, 320, int(self.profile.get("bitrate", 128)))
+        self.bitrate = spin(32, 320, int(self.profile.get("bitrate", 192)))
         self.bitrate.setSuffix(" kbps")
-        stream_form.addRow("Qualidade MP3", self.bitrate)
+        stream_form.addRow("Bitrate do stream", self.bitrate)
+        self.encoder_quality = QComboBox()
+        for label, value in ENCODER_QUALITY_PRESETS:
+            self.encoder_quality.addItem(label, value)
+        quality = bounded_int(self.profile.get("encoder_quality"), 2, 0, 9)
+        index = self.encoder_quality.findData(quality)
+        self.encoder_quality.setCurrentIndex(index if index >= 0 else 1)
+        self.encoder_quality.setToolTip(
+            "Controla a complexidade do encoder MP3. Níveis menores priorizam qualidade e usam mais CPU.")
+        stream_form.addRow("Qualidade do encoder", self.encoder_quality)
         stream_layout.addLayout(stream_form)
 
         metadata_group = QGroupBox("Dados enviados ao servidor")
@@ -212,6 +224,7 @@ class ProfileDialog(QDialog):
                              "metadata_user": self.metadata_user.text().strip() or "admin",
                              "mount": self.mount.text().strip() or "/live.mp3",
                              "user": self.user.text().strip() or "source", "bitrate": self.bitrate.value(),
+                             "encoder_quality": int(self.encoder_quality.currentData()),
                              "station": self.station.text().strip(), "genre": self.genre.text().strip(),
                              "url": self.url.text().strip(), "description": self.description.text().strip(),
                              "enabled": self.enabled.isChecked()})
@@ -240,14 +253,22 @@ class BroadcastPanel(QWidget):
         self.max_listeners = spin(1, 1000, 10)
         grid.addWidget(self.max_listeners, 1, 3)
         grid.addWidget(QLabel("MP3 (kbps)"), 2, 0)
-        self.local_bitrate = spin(32, 320, 128)
+        self.local_bitrate = spin(32, 320, 192)
         grid.addWidget(self.local_bitrate, 2, 1)
         grid.addWidget(QLabel("Nome da rádio"), 2, 2)
         self.local_station = QLineEdit()
         self.local_station.setPlaceholderText("Usar Configurações > Metadados")
         grid.addWidget(self.local_station, 2, 3)
+        grid.addWidget(QLabel("Qualidade do encoder"), 3, 0)
+        self.local_encoder_quality = QComboBox()
+        for label, value in ENCODER_QUALITY_PRESETS:
+            self.local_encoder_quality.addItem(label, value)
+        self.local_encoder_quality.setCurrentIndex(1)
+        self.local_encoder_quality.setToolTip(
+            "Níveis menores priorizam qualidade e usam mais CPU.")
+        grid.addWidget(self.local_encoder_quality, 3, 1, 1, 3)
         self.local_url = QLabel("Endereço: http://127.0.0.1:8090/live.mp3")
-        grid.addWidget(self.local_url, 3, 0, 1, 4)
+        grid.addWidget(self.local_url, 4, 0, 1, 4)
         self.local_port.valueChanged.connect(self.update_url)
         self.lan.toggled.connect(self.update_url)
         layout.addWidget(local_group)
@@ -299,7 +320,9 @@ class BroadcastPanel(QWidget):
     def local_config(self):
         return {"enabled": self.local_enabled.isChecked(), "lan": self.lan.isChecked(),
                 "port": self.local_port.value(), "max_listeners": self.max_listeners.value(),
-                "bitrate": self.local_bitrate.value(), "station": self.local_station.text().strip()}
+                "bitrate": self.local_bitrate.value(),
+                "encoder_quality": int(self.local_encoder_quality.currentData()),
+                "station": self.local_station.text().strip()}
 
     def load_config(self, profiles, local):
         self.profiles = []
@@ -312,7 +335,8 @@ class BroadcastPanel(QWidget):
             profile["port"] = bounded_int(saved.get("port"), 8000, 1, 65535)
             profile["http_port"] = bounded_int(saved.get("http_port"), 0, 0, 65535)
             profile["stream_id"] = bounded_int(saved.get("stream_id"), 1, 1, 999)
-            profile["bitrate"] = bounded_int(saved.get("bitrate"), 128, 32, 320)
+            profile["bitrate"] = bounded_int(saved.get("bitrate"), 192, 32, 320)
+            profile["encoder_quality"] = bounded_int(saved.get("encoder_quality"), 2, 0, 9)
             profile["enabled"] = bool(saved.get("enabled", True))
             profile["tls"] = bool(saved.get("tls", False))
             for key in ("name", "host", "mount", "user", "station", "genre", "url",
@@ -328,7 +352,10 @@ class BroadcastPanel(QWidget):
         self.lan.setChecked(bool(local.get("lan", False)))
         self.local_port.setValue(bounded_int(local.get("port"), 8090, 1, 65535))
         self.max_listeners.setValue(bounded_int(local.get("max_listeners"), 10, 1, 1000))
-        self.local_bitrate.setValue(bounded_int(local.get("bitrate"), 128, 32, 320))
+        self.local_bitrate.setValue(bounded_int(local.get("bitrate"), 192, 32, 320))
+        quality = bounded_int(local.get("encoder_quality"), 2, 0, 9)
+        quality_index = self.local_encoder_quality.findData(quality)
+        self.local_encoder_quality.setCurrentIndex(quality_index if quality_index >= 0 else 1)
         self.local_station.setText("" if local.get("station") == "RadioStudio Python"
                                    else str(local.get("station") or ""))
         for profile in self.profiles:

@@ -17,6 +17,7 @@ from PySide6.QtCore import QTime, QThreadPool
 
 from ..services.autodj import DAY_NAMES, FILTER_FIELDS, active_program
 from ..runtime_safety import guarded
+from .icons import apply_app_icon
 
 
 def _text(value, default=""):
@@ -52,6 +53,7 @@ class _ScanWorker(QRunnable):
 class ProgramDialog(QDialog):
     def __init__(self, libraries, program=None, parent=None):
         super().__init__(parent)
+        apply_app_icon(self)
         self.setWindowTitle("Programação AutoDJ")
         self.resize(570, 610)
         program = program or {}

@@ -1,9 +1,15 @@
-import unittest
+import json
+import math
+import struct
 import threading
+import time
+import unittest
 from unittest.mock import patch
+from urllib.request import urlopen
 
 from radiostudio.services.broadcast import (
-    BroadcastManager, EncoderOutput, LocalStreamServer, RemoteSink,
+    FRAME_MS, PCM_BYTES_PER_FRAME, SAMPLE_RATE, BroadcastManager, EncoderOutput,
+    LocalStreamServer, RemoteSink,
 )
 
 
@@ -12,6 +18,7 @@ class _FragmentedSocket:
         self.response = bytearray(response)
         self.sent = []
         self.closed = False
+        self.shutdown_called = False
 
     def settimeout(self, _timeout):
         pass
@@ -27,8 +34,89 @@ class _FragmentedSocket:
     def close(self):
         self.closed = True
 
+    def shutdown(self, _how):
+        self.shutdown_called = True
+
+
+class _BlockingSocket(_FragmentedSocket):
+    def __init__(self):
+        super().__init__(b"")
+        self.send_started = threading.Event()
+        self.release_send = threading.Event()
+
+    def sendall(self, data):
+        self.sent.append(data)
+        self.send_started.set()
+        self.release_send.wait(1)
+
+    def shutdown(self, how):
+        super().shutdown(how)
+        self.release_send.set()
+
 
 class BroadcastStartupTests(unittest.TestCase):
+    def test_embedded_stream_delivers_live_mp3_before_source_ends(self):
+        server = LocalStreamServer("127.0.0.1", 0, 2, "Synthetic")
+        server.start()
+        output = EncoderOutput("Servidor embutido", 192, server)
+        output.start()
+        response = None
+        feeder_stop = threading.Event()
+        feeder = None
+        try:
+            deadline = time.monotonic() + 5
+            while output.status != "Ativo" and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertEqual(output.status, "Ativo", output.error)
+            port = server.server.server_address[1]
+            response = urlopen(f"http://127.0.0.1:{port}/live.mp3", timeout=4)
+
+            def feed_synthetic_pcm():
+                samples_per_frame = PCM_BYTES_PER_FRAME // 4
+                for frame in range(200):
+                    if feeder_stop.is_set():
+                        return
+                    first_sample = frame * samples_per_frame
+                    samples = (int(5000 * math.sin(
+                        2 * math.pi * 440 * (first_sample + index) / SAMPLE_RATE))
+                        for index in range(samples_per_frame))
+                    pcm = b"".join(struct.pack("<hh", sample, sample) for sample in samples)
+                    output.feed(pcm)
+                    time.sleep(FRAME_MS / 1000)
+
+            feeder = threading.Thread(target=feed_synthetic_pcm, daemon=True)
+            feeder.start()
+            started = time.monotonic()
+            encoded_audio = response.read(1024)
+            elapsed = time.monotonic() - started
+
+            self.assertEqual(response.status, 200)
+            self.assertTrue(encoded_audio.startswith(b"\xff"))
+            self.assertLess(elapsed, 3)
+            self.assertEqual(output.dropped_encoded_chunks, 0)
+        finally:
+            feeder_stop.set()
+            if response:
+                response.close()
+            if feeder:
+                feeder.join(timeout=1)
+            output.stop()
+            if output.thread:
+                output.thread.join(timeout=3)
+            server.stop()
+
+    def test_embedded_status_endpoint_returns_audio_diagnostics(self):
+        server = LocalStreamServer("127.0.0.1", 0, 10, "Test")
+        server.diagnostics_provider = lambda: {"mixer": {"overruns": 0}}
+        server.start()
+        try:
+            port = server.server.server_address[1]
+            with urlopen(f"http://127.0.0.1:{port}/status.json", timeout=2) as response:
+                data = json.load(response)
+            self.assertEqual(data["audio_diagnostics"]["mixer"]["overruns"], 0)
+        finally:
+            server.stop()
+
     def test_shoutcast_authentication_accepts_fragmented_status_line(self):
         sock = _FragmentedSocket(b"OK2\n")
         sink = RemoteSink({"kind": "shoutcast", "host": "localhost", "port": 8000,
@@ -40,6 +128,77 @@ class BroadcastStartupTests(unittest.TestCase):
         self.assertIs(sink.sock, sock)
         self.assertEqual(sock.sent[0], b"secret\n")
         self.assertIn(b"icy-name:Test", sock.sent[1])
+
+    def test_icecast_uses_raw_put_body_with_expect_continue(self):
+        sock = _FragmentedSocket(b"HTTP/1.1 100 Continue\r\n\r\n")
+        sink = RemoteSink({"kind": "icecast", "host": "localhost", "port": 8000,
+                           "mount": "/live.mp3", "station": "Test", "genre": "",
+                           "url": "", "description": ""}, "secret")
+        with patch("radiostudio.services.broadcast.socket.create_connection", return_value=sock):
+            sink.connect()
+        try:
+            sink.publish(b"mp3-frame")
+            request = sock.sent[0]
+            self.assertTrue(request.startswith(b"PUT /live.mp3 HTTP/1.1"))
+            self.assertIn(b"Expect: 100-continue", request)
+            self.assertNotIn(b"Transfer-Encoding: chunked", request)
+            self.assertEqual(sock.sent[1], b"mp3-frame")
+        finally:
+            sink.close()
+
+    def test_icecast_accepts_success_without_continue_response(self):
+        sock = _FragmentedSocket(b"HTTP/1.0 200 OK\r\n\r\n")
+        sink = RemoteSink({"kind": "icecast", "host": "localhost", "port": 8000,
+                           "mount": "/live.mp3"}, "secret")
+        with patch("radiostudio.services.broadcast.socket.create_connection", return_value=sock):
+            sink.connect()
+        self.assertIs(sink.sock, sock)
+        sink.close()
+
+    def test_abort_remote_icecast_does_not_write_chunk_terminator(self):
+        sock = _FragmentedSocket(b"")
+        sink = RemoteSink({"kind": "icecast", "id": "icecast-1"}, "secret")
+        sink.sock = sock
+
+        sink.close(graceful=False)
+
+        self.assertEqual(sock.sent, [])
+        self.assertTrue(sock.shutdown_called)
+        self.assertTrue(sock.closed)
+
+    def test_close_interrupts_blocked_writer_before_stream_shutdown(self):
+        sock = _BlockingSocket()
+        sink = RemoteSink({"kind": "icecast", "id": "icecast-2"}, "secret")
+        sink.sock = sock
+        output = EncoderOutput("Icecast", 128, sink)
+        writer = threading.Thread(target=sink.publish, args=(b"audio",))
+        output.writer_thread = writer
+        writer.start()
+        self.assertTrue(sock.send_started.wait(1))
+
+        output._close_connection()
+
+        self.assertFalse(writer.is_alive())
+        self.assertTrue(sock.shutdown_called)
+        self.assertEqual(sock.sent, [b"audio"])
+        self.assertTrue(sock.closed)
+
+    def test_graceful_icecast_close_finishes_unframed_request(self):
+        sock = _FragmentedSocket(b"")
+        sink = RemoteSink({"kind": "icecast"}, "secret")
+        sink.sock = sock
+
+        sink.close()
+
+        self.assertEqual(sock.sent, [])
+        self.assertTrue(sock.shutdown_called)
+        self.assertTrue(sock.closed)
+
+    def test_publish_after_close_reports_connection_error(self):
+        sink = RemoteSink({"kind": "shoutcast"}, "secret")
+
+        with self.assertRaisesRegex(ConnectionError, "Conexão de transmissão encerrada"):
+            sink.publish(b"audio")
 
     def test_missing_remote_password_does_not_block_embedded_output(self):
         manager = BroadcastManager()

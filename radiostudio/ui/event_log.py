@@ -1,5 +1,6 @@
 """Event Log operations for the main window."""
 
+import logging
 import os
 
 from ._shared import *
@@ -61,7 +62,8 @@ class EventLogMixin:
                     except (ValueError, KeyError, TypeError):
                         continue
         except OSError:
-            pass
+            logging.getLogger("radiostudio").exception(
+                "Não foi possível carregar o histórico de eventos")
 
     @guarded
     def log_event(self, kind: str, message: str):
@@ -86,4 +88,6 @@ class EventLogMixin:
                 destination.write(json.dumps({"time": timestamp, "kind": kind,
                                               "message": message}, ensure_ascii=False) + "\n")
         except OSError:
+            logging.getLogger("radiostudio").exception(
+                "Não foi possível gravar o histórico de eventos")
             self.statusBar().showMessage("Não foi possível gravar o histórico no disco")
