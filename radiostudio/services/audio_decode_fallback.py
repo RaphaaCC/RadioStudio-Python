@@ -17,6 +17,9 @@ class AudioDecodeFallback(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._jobs = {}
+        # Keep canceled QProcesses reachable until FFmpeg has actually exited.
+        # They leave _jobs immediately so a later completion cannot start playback.
+        self._running_processes = {}
         self._temporary_files: set[str] = set()
 
     def convert(self, player, source: str, callback) -> bool:
@@ -37,6 +40,7 @@ class AudioDecodeFallback(QObject):
         job = {"process": process, "source": source, "output": str(output_path),
                "callback": callback}
         self._jobs[player] = job
+        self._running_processes[id(process)] = (player, job)
         process.finished.connect(
             lambda code, _status, p=player, current=job: self._finish(p, current, code))
         process.errorOccurred.connect(
@@ -65,6 +69,7 @@ class AudioDecodeFallback(QObject):
         if process.state() != QProcess.NotRunning:
             process.kill()
         else:
+            self._running_processes.pop(id(process), None)
             self._remove_file(job["output"])
             process.deleteLater()
 
@@ -76,6 +81,7 @@ class AudioDecodeFallback(QObject):
             self._finish(player, job, -1, job["process"].errorString())
 
     def _finish(self, player, job, exit_code: int, error: str = "") -> None:
+        self._running_processes.pop(id(job["process"]), None)
         if self._jobs.get(player) is not job:
             self._remove_file(job["output"])
             job["process"].deleteLater()
@@ -119,14 +125,22 @@ class AudioDecodeFallback(QObject):
                     "Não foi possível remover o áudio temporário: %s", path)
 
     def shutdown(self) -> None:
-        jobs = tuple(self._jobs.items())
+        processes = tuple(self._running_processes.values())
         self._jobs.clear()
-        for _player, job in jobs:
+        for player, job in processes:
             process = job["process"]
             if process.state() != QProcess.NotRunning:
                 process.kill()
-                process.waitForFinished(1000)
-            self._remove_file(job["output"])
-            process.deleteLater()
+                if not process.waitForFinished(1000):
+                    process.kill()
+                    process.waitForFinished(2000)
+            if process.state() == QProcess.NotRunning:
+                # waitForFinished can return before Qt delivers finished; run
+                # the stale-job cleanup now so no QProcess child survives us.
+                if id(process) in self._running_processes:
+                    self._finish(player, job, -1, "Conversão cancelada no encerramento")
+            else:
+                logging.getLogger("radiostudio").error(
+                    "O processo FFmpeg não encerrou durante o fechamento do aplicativo")
         for path in tuple(self._temporary_files):
             self._remove_file(path)

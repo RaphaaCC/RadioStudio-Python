@@ -2,6 +2,7 @@
 
 from ._shared import *
 from ..runtime_safety import guarded
+from ..services.audio_paths import same_audio_path
 
 
 class CartWallMixin:
@@ -76,7 +77,7 @@ class CartWallMixin:
     @guarded
     def cart_decode_fallback_ready(self, player, source, decoded_path, error):
         if (not any(entry[0] is player for entry in self.cart_players)
-                or player.source().toLocalFile() != source):
+                or not same_audio_path(player.source().toLocalFile(), source)):
             if decoded_path:
                 self.audio_decode_fallback.release(decoded_path, delay_ms=0)
             return

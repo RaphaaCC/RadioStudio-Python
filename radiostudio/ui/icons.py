@@ -19,3 +19,9 @@ def apply_app_icon(window) -> None:
     icon = app_icon()
     if not icon.isNull():
         window.setWindowIcon(icon)
+        # QWidget can be assigned its icon before the native window exists.
+        # Reapply it to QWindow when available so Windows also receives the
+        # icon for the taskbar after the HWND has been created.
+        handle = window.windowHandle()
+        if handle is not None:
+            handle.setIcon(icon)

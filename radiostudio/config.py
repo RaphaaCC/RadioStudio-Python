@@ -7,10 +7,10 @@ import sys
 import tempfile
 from pathlib import Path
 
-APP_NAME = "RadioStudio Python"
-APP_VERSION = "1.0.0 Beta"
+APP_NAME = "RadioStudio Python Sirius"
+APP_VERSION = "v1.0.0 Stable"
 APP_CODENAME = "Sirius"
-APP_DISPLAY_NAME = f"{APP_NAME} {APP_VERSION} — {APP_CODENAME}"
+APP_DISPLAY_NAME = f"{APP_NAME} — {APP_VERSION}"
 ASSET_DIR = Path(__file__).resolve().parent / "assets"
 APP_ICON_FILE = ASSET_DIR / "icon.ico"
 ABOUT_LOGO_FILE = ASSET_DIR / "logo-about-window.png"

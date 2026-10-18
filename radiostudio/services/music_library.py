@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from ..config import APP_DIR, AUDIO_EXTENSIONS
+from .audio_paths import audio_path_key
 from .track_metadata import read_track_metadata
 
 
@@ -289,7 +290,10 @@ class MusicLibrary:
     def latest_track_plays(self):
         with self._connect() as db:
             rows = db.execute("SELECT path, MAX(played_at) AS played_at FROM play_history GROUP BY path")
-            paths = {str(row["path"]).casefold(): float(row["played_at"]) for row in rows}
+            paths = {}
+            for row in rows:
+                key = audio_path_key(row["path"])
+                paths[key] = max(paths.get(key, 0.0), float(row["played_at"]))
             rows = db.execute("SELECT artist, MAX(played_at) AS played_at FROM play_history "
                               "WHERE artist<>'' GROUP BY artist COLLATE NOCASE")
             artists = {str(row["artist"]).casefold(): float(row["played_at"]) for row in rows}

@@ -10,6 +10,7 @@ from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 
 from ..services.track_metadata import read_track_metadata
 from ..services.audio_decode_fallback import AudioDecodeFallback
+from ..services.audio_paths import same_audio_path
 from ..runtime_safety import guarded
 from .icons import apply_app_icon
 
@@ -91,7 +92,7 @@ class PreviewPlayerDialog(QDialog):
         details = " — ".join(value for value in (metadata.artist, metadata.album) if value)
         self.details_label.setText(details or Path(path).name)
         self.setWindowTitle(f"🎧 Pré-escuta — {metadata.title or Path(path).stem}")
-        if self.player.source().toLocalFile() != path:
+        if not same_audio_path(self.player.source().toLocalFile(), path):
             self.audio_decode_fallback.cancel(self.player)
             old_decoded = self._decoded_path
             self._decoded_path = ""
@@ -160,7 +161,7 @@ class PreviewPlayerDialog(QDialog):
         elif status == QMediaPlayer.InvalidMedia:
             source = self._decoded_path or self.player.source().toLocalFile()
             if (not self._decoded_path and source
-                    and self._fallback_attempted_source != source):
+                    and not same_audio_path(self._fallback_attempted_source, source)):
                 self._fallback_attempted_source = source
                 self.status_label.setText("Preparando decodificação compatível…")
                 self.audio_decode_fallback.convert(
@@ -170,7 +171,7 @@ class PreviewPlayerDialog(QDialog):
 
     @guarded
     def decode_fallback_ready(self, source, decoded_path, error) -> None:
-        if self.player.source().toLocalFile() != source:
+        if not same_audio_path(self.player.source().toLocalFile(), source):
             if decoded_path:
                 self.audio_decode_fallback.release(decoded_path, delay_ms=0)
             return

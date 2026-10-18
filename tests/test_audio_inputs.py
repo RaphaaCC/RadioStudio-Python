@@ -8,7 +8,7 @@ from radiostudio.services.audio_inputs import (convert_input_to_master,
                                                convert_master_to_device,
                                                mix_pcm_chunks, pcm_rms_db,
                                                AudioInputController)
-from radiostudio.services.broadcast import PCM_BYTES_PER_FRAME, SAMPLE_RATE
+from radiostudio.services.broadcast import PCMBuffer, PCM_BYTES_PER_FRAME, SAMPLE_RATE
 
 
 class AudioInputConversionTests(unittest.TestCase):
@@ -135,6 +135,19 @@ class AudioInputConversionTests(unittest.TestCase):
         self.assertEqual(broadcast.calls[0][0], "input:aux1")
         self.assertEqual(broadcast.calls[0][2], 1.0)
         controller.active.clear()
+        controller.deleteLater()
+        self.app.processEvents()
+
+    def test_stopping_monitor_discards_unprimed_pcm(self):
+        controller = AudioInputController(broadcast=None)
+        buffer = PCMBuffer()
+        buffer.append(b"\x01\x00" * (PCM_BYTES_PER_FRAME // 2))
+        controller.monitor_buffers["aux1"] = buffer
+
+        controller._stop_monitor()
+
+        self.assertEqual(buffer.length, 0)
+        self.assertFalse(buffer.primed)
         controller.deleteLater()
         self.app.processEvents()
 

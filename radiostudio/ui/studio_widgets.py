@@ -6,6 +6,7 @@ from ..runtime_safety import guarded
 
 from array import array
 from datetime import datetime
+import logging
 from math import cos, floor, log10, pi, sin, sqrt
 from pathlib import Path
 import sys
@@ -395,6 +396,9 @@ class OnAirPanel(QFrame):
         times.addWidget(self.remaining, 1)
         layout.addLayout(times)
         self._process: QProcess | None = None
+        # A canceled analysis can still be stopping while the next track starts
+        # its own FFmpeg job. Keep every child reachable through shutdown.
+        self._wave_processes: dict[int, QProcess] = {}
         self._wave_data = bytearray()
         self._wave_overflow = False
         self._broadcast_active = False
@@ -461,6 +465,9 @@ class OnAirPanel(QFrame):
         process.setStandardErrorFile(QProcess.nullDevice())
         process.readyReadStandardOutput.connect(lambda: self._read_wave_data(process))
         process.finished.connect(lambda code, _status: self._finish_wave(process, code))
+        process.errorOccurred.connect(
+            lambda error: self._wave_process_error(process, error))
+        self._wave_processes[id(process)] = process
         self._process = process
         self._wave_data = bytearray()
         self._wave_overflow = False
@@ -476,6 +483,24 @@ class OnAirPanel(QFrame):
         self.title.setToolTip("")
         self.waveform.set_levels([])
         self.set_progress(0, 0)
+
+    def shutdown_analysis(self):
+        self.clear_track()
+        # Include analyses canceled by earlier track/style changes, not only
+        # the newest process stored in _process. Otherwise destroying this
+        # parent can destroy an older QProcess while FFmpeg is still exiting.
+        for process in tuple(self._wave_processes.values()):
+            if process.state() != QProcess.NotRunning:
+                process.kill()
+                if not process.waitForFinished(2000):
+                    process.kill()
+                    process.waitForFinished(2000)
+            if process.state() == QProcess.NotRunning:
+                self._wave_processes.pop(id(process), None)
+                process.deleteLater()
+            else:
+                logging.getLogger("radiostudio").error(
+                    "O processo FFmpeg do visualizador não encerrou ao fechar")
 
     @guarded
     def set_progress(self, position_ms: int, duration_ms: int):
@@ -497,9 +522,24 @@ class OnAirPanel(QFrame):
         self._process = None
         if process is not None:
             if process.state() != QProcess.NotRunning:
+                # QProcess must stay alive until the asynchronous kill has completed.
+                # Deleting it here can leave FFmpeg running and emit
+                # "QProcess: Destroyed while process ... is still running".
                 process.kill()
-            process.deleteLater()
+            else:
+                self._wave_processes.pop(id(process), None)
+                process.deleteLater()
         self._wave_data = bytearray()
+
+    @guarded
+    def _wave_process_error(self, process: QProcess, error):
+        if error == QProcess.FailedToStart:
+            self._wave_processes.pop(id(process), None)
+            if process is self._process:
+                self._process = None
+                self._wave_data = bytearray()
+            # FailedToStart does not emit finished, so release the process here.
+            process.deleteLater()
 
     @guarded
     def _read_wave_data(self, process: QProcess):
@@ -512,7 +552,10 @@ class OnAirPanel(QFrame):
 
     @guarded
     def _finish_wave(self, process: QProcess, exit_code: int):
+        self._wave_processes.pop(id(process), None)
         if process is not self._process:
+            # Canceled analyses finish asynchronously; they still need cleanup.
+            process.deleteLater()
             return
         self._read_wave_data(process)
         self._process = None

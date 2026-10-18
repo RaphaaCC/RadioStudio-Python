@@ -4,15 +4,48 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import imageio_ffmpeg
+from PySide6.QtCore import QProcess
 from PySide6.QtWidgets import QApplication
 
 from radiostudio.services.audio_decode_fallback import AudioDecodeFallback
 
 
 class AudioDecodeFallbackTests(unittest.TestCase):
+    def test_shutdown_reaps_ffmpeg_jobs_canceled_before_close(self):
+        app = QApplication.instance() or QApplication([])
+        self.assertIsNotNone(app)
+        with tempfile.TemporaryDirectory(prefix="radiostudio-fallback-test-") as folder:
+            player = object()
+            process = Mock()
+            process.state.return_value = QProcess.Running
+            job = {"process": process, "source": "source.mp3",
+                   "output": str(Path(folder) / "pending.wav"),
+                   "callback": Mock()}
+            fallback = AudioDecodeFallback()
+            fallback._jobs[player] = job
+            fallback._running_processes[id(process)] = (player, job)
+
+            fallback.cancel(player)
+
+            self.assertFalse(fallback.is_pending(player))
+            self.assertIn(id(process), fallback._running_processes)
+            process.kill.assert_called_once_with()
+
+            def finish_process(_timeout):
+                process.state.return_value = QProcess.NotRunning
+                return True
+
+            process.waitForFinished.side_effect = finish_process
+            fallback.shutdown()
+
+            process.waitForFinished.assert_called_once_with(1000)
+            process.deleteLater.assert_called_once_with()
+            self.assertFalse(fallback._running_processes)
+            job["callback"].assert_not_called()
+
     def test_ffmpeg_lookup_failure_clears_pending_job_and_reports_error(self):
         app = QApplication.instance() or QApplication([])
         self.assertIsNotNone(app)

@@ -864,7 +864,8 @@ class BroadcastManager:
                     try:
                         self.local_server.stop()
                     except Exception:
-                        pass
+                        logging.getLogger("radiostudio").exception(
+                            "Falha ao encerrar o servidor embutido após erro na inicialização")
                     self.outputs = [output for output in targets
                                     if output.destination is not self.local_server]
                     self.local_server = None

@@ -8,6 +8,7 @@ import uuid
 
 from ._shared import *
 from ..runtime_safety import guarded
+from ..services.audio_paths import same_audio_path
 from ..services.audio_inputs import INPUT_CHANNELS
 
 
@@ -59,7 +60,8 @@ class PersistenceMixin:
             self.log_event("error", f"Não foi possível retomar o áudio: {path or 'arquivo ausente'}")
             self.save_state()
             return
-        index = next((i for i, candidate in enumerate(self.tracks) if candidate == path), -1)
+        index = next((i for i, candidate in enumerate(self.tracks)
+                      if same_audio_path(candidate, path)), -1)
         if index < 0:
             self.tracks.append(path)
             self.track_sources.append("manual")
@@ -273,7 +275,7 @@ class PersistenceMixin:
             ("player principal", self.player.stop),
             ("player de mix", self.mix_player.stop),
             ("decodificador alternativo", self.shutdown_audio_fallback),
-            ("visualizador", self.on_air.clear_track),
+            ("visualizador", self.on_air.shutdown_analysis),
         ]
         if self.tray_icon:
             cleanup_steps.append(("bandeja", self.tray_icon.hide))

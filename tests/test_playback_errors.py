@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from PySide6.QtCore import QCoreApplication, QUrl
@@ -30,6 +31,58 @@ class _FakePlayer:
 class _FakeAudio:
     def setVolume(self, _value):
         pass
+
+
+class _DisplayPlayer:
+    def __init__(self, path, duration=0, position=0, state=QMediaPlayer.PlayingState,
+                 status=QMediaPlayer.LoadedMedia):
+        self._source = QUrl.fromLocalFile(path)
+        self._duration = duration
+        self._position = position
+        self._state = state
+        self._status = status
+
+    def source(self):
+        return self._source
+
+    def duration(self):
+        return self._duration
+
+    def position(self):
+        return self._position
+
+    def playbackState(self):
+        return self._state
+
+    def mediaStatus(self):
+        return self._status
+
+    def stop(self):
+        self._state = QMediaPlayer.StoppedState
+
+
+class _DisplaySlider:
+    def __init__(self):
+        self.range = None
+        self.value = None
+        self.slider_down = False
+
+    def setRange(self, minimum, maximum):
+        self.range = (minimum, maximum)
+
+    def setValue(self, value):
+        self.value = value
+
+    def isSliderDown(self):
+        return self.slider_down
+
+
+class _DisplayLabel:
+    def __init__(self):
+        self.text = ""
+
+    def setText(self, value):
+        self.text = value
 
 
 class _FakeTimer:
@@ -125,8 +178,39 @@ class _FakeStatusBar:
 
 
 class _FakeOnAir:
+    def __init__(self):
+        self._track_path = "old-track.mp3"
+        self.title = _FakeTextLabel("Faixa anterior")
+        self.progress = None
+
     def clear_track(self):
         pass
+
+    def show_track(self, title, path):
+        self.title.setText(title)
+        self.title.setToolTip(title)
+        self._track_path = str(path)
+
+    def set_progress(self, position, duration):
+        self.progress = (position, duration)
+
+
+class _FakeTextLabel:
+    def __init__(self, text=""):
+        self._text = text
+        self.tooltip = ""
+
+    def text(self):
+        return self._text
+
+    def setText(self, text):
+        self._text = text
+
+    def setToolTip(self, text):
+        self.tooltip = text
+
+    def __eq__(self, other):
+        return self._text == other
 
 
 class _FakeDecodeFallback:
@@ -156,6 +240,85 @@ class _FakeBroadcast:
 
     def clear_source(self, source, *, preserve_primed=False):
         self.cleared_sources.append((source, preserve_primed))
+
+
+class _PromotionBroadcast:
+    def promote_source(self, _incoming, _active):
+        raise RuntimeError("saída de transmissão indisponível")
+
+    def remove_source(self, _source):
+        pass
+
+    def clear_source(self, _source, *, preserve_primed=False):
+        pass
+
+    def set_title(self, _title):
+        pass
+
+
+class _DisplayHarness(PlaybackMixin):
+    def __init__(self):
+        self.player = _DisplayPlayer("next-track.mp3", 180000, 125000)
+        self.current_index = 0
+        self.tracks = ["next-track.mp3"]
+        self.mix_target_index = -1
+        self.decoded_audio_sources = {}
+        self.on_air = _FakeOnAir()
+        self.position = _DisplaySlider()
+        self.position_label = _DisplayLabel()
+        self.pending_track_log = None
+        self.is_quitting = False
+        self.save_calls = 0
+
+    def save_state(self):
+        self.save_calls += 1
+
+
+class _PromotionHarness(_DisplayHarness):
+    def __init__(self):
+        super().__init__()
+        self.player = _DisplayPlayer("old-track.mp3", 180000, 180000,
+                                     QMediaPlayer.StoppedState)
+        self.mix_player = _DisplayPlayer("next-track.mp3", 180000, 125000)
+        self.audio = _FakeAudio()
+        self.mix_audio = _FakeAudio()
+        self.main_buffer_output = object()
+        self.mix_buffer_output = object()
+        self.current_index = 0
+        self.tracks = ["old-track.mp3", "next-track.mp3"]
+        self.mix_target_index = 1
+        self.stop_pending = False
+        self.is_quitting = False
+        self._media_end_generation = 0
+        self._pending_media_end = None
+        self.mix_fade_duration_ms = 1000
+        self.mix_fade_in_duration_ms = 1000
+        self.mix_fade_out_duration_ms = 1000
+        self.mix_fade_started = True
+        self.mix_cue_ms = 0
+        self.fade_in_pending_ms = 0
+        self.pending_main_cue_ms = 0
+        self.pending_resume_position = None
+        self.main_gain = 0.0
+        self.mix_gain = 1.0
+        self.gain_ramps = {"main": (0.0,), "mix": (1.0,)}
+        self.broadcast = _PromotionBroadcast()
+        self.station_metadata = {"title_format": ""}
+        self.playlist = type("Playlist", (), {"selectRow": lambda _self, _index: None})()
+        self.events = []
+        self.saved = False
+
+    def apply_main_volume(self):
+        pass
+
+    def log_event(self, kind, message):
+        self.events.append((kind, message))
+
+    def record_track_started(self, _path):
+        pass
+
+    def save_state(self):
+        self.saved = True
 
 
 class _PlaybackHarness(PlaybackMixin):
@@ -230,6 +393,9 @@ class PlaybackErrorTests(unittest.TestCase):
         player = _PlaybackHarness()
         player.current_index = 0
         player.tracks = ["bad-track.mp3", "next-track.mp3"]
+        player.player = _DisplayPlayer("bad-track.mp3", 10000, 10000,
+                                       QMediaPlayer.StoppedState,
+                                       QMediaPlayer.EndOfMedia)
         player.mix_target_index = -1
         player.stop_pending = False
         player._media_end_generation = 0
@@ -264,6 +430,171 @@ class PlaybackErrorTests(unittest.TestCase):
 
         self.assertEqual(player.next_calls, 0)
 
+    def test_end_transition_does_not_promote_mix_from_a_stale_queue_row(self):
+        player = _PromotionHarness()
+        player.tracks[1] = "replacement-track.mp3"
+        player._pending_media_end = (0, 0, "old-track.mp3")
+        player.promote_calls = 0
+        player.next_calls = 0
+        player.promote_mix_player = lambda: setattr(
+            player, "promote_calls", player.promote_calls + 1)
+        player.next_track = lambda: setattr(player, "next_calls", player.next_calls + 1)
+
+        PlaybackMixin.finish_media_end_transition(
+            player, (0, 0, "old-track.mp3"))
+
+        self.assertEqual(player.promote_calls, 0)
+        self.assertEqual(player.next_calls, 1)
+
+    def test_stale_end_callback_does_not_advance_a_track_that_is_still_playing(self):
+        player = _PromotionHarness()
+        player._pending_media_end = (0, 0, "old-track.mp3")
+        player.mix_target_index = -1
+        player.player = _DisplayPlayer("old-track.mp3", 180000, 5000,
+                                       QMediaPlayer.PlayingState,
+                                       QMediaPlayer.LoadedMedia)
+        player.next_calls = 0
+        player.next_track = lambda: setattr(player, "next_calls", player.next_calls + 1)
+
+        PlaybackMixin.finish_media_end_transition(
+            player, (0, 0, "old-track.mp3"))
+
+        self.assertEqual(player.next_calls, 0)
+
+    def test_loading_duplicate_track_does_not_inherit_previous_end_position(self):
+        player = _PromotionHarness()
+        player.tracks = ["old-track.mp3", "old-track.mp3", "third-track.mp3"]
+        player.current_index = 1
+        player._pending_media_end = (0, 1, "old-track.mp3")
+        player.mix_target_index = -1
+        player.player = _DisplayPlayer("old-track.mp3", 180000, 180000,
+                                       QMediaPlayer.StoppedState,
+                                       QMediaPlayer.LoadingMedia)
+        player.next_calls = 0
+        player.next_track = lambda: setattr(player, "next_calls", player.next_calls + 1)
+
+        PlaybackMixin.finish_media_end_transition(
+            player, (0, 1, "old-track.mp3"))
+
+        self.assertEqual(player.next_calls, 0)
+
+    def test_end_transition_promotes_mix_when_qt_normalizes_windows_path(self):
+        player = _PromotionHarness()
+        old_path = r"C:\Music\old-track.mp3"
+        next_path = r"C:\Music\next-track.mp3"
+        player.tracks = [old_path, next_path]
+        player.player = _DisplayPlayer(old_path, 180000, 180000,
+                                       QMediaPlayer.StoppedState,
+                                       QMediaPlayer.EndOfMedia)
+        player.mix_player = _DisplayPlayer(next_path, 180000, 125000)
+        player._pending_media_end = (0, 0, old_path)
+        metadata = SimpleNamespace(
+            display_title="Faixa nova", path=next_path, duration=180.0)
+
+        with (patch("radiostudio.ui.playback.read_track_metadata", return_value=metadata),
+              patch("radiostudio.ui.playback.format_broadcast_title", return_value="Faixa nova"),
+              patch("radiostudio.ui.playback._logger.exception")):
+            PlaybackMixin.finish_media_end_transition(
+                player, (0, 0, old_path))
+
+        self.assertEqual(player.current_index, 1)
+        self.assertEqual(player.on_air.title.text(), "Faixa nova")
+        self.assertEqual(player.position_label.text, "02:05 / 03:00")
+
+    def test_consecutive_mix_promotions_advance_queue_after_each_end(self):
+        player = _PromotionHarness()
+        first = r"C:\Music\first.mp3"
+        second = r"C:\Music\second.mp3"
+        third = r"C:\Music\third.mp3"
+        player.tracks = [first, second, third]
+        player.player = _DisplayPlayer(first, 180000, 180000,
+                                       QMediaPlayer.StoppedState,
+                                       QMediaPlayer.EndOfMedia)
+        player.mix_player = _DisplayPlayer(second, 180000, 125000)
+        player.mix_target_index = 1
+        player._pending_media_end = (0, 0, first)
+        player._suppress_end_recovery = False
+        player.pending_resume_position = None
+        player.stop_pending = False
+        player._display_sync_path = ""
+        player._display_sync_metadata = None
+
+        def metadata_for(path):
+            return SimpleNamespace(
+                display_title=Path(path).stem.title(),
+                path=path,
+                duration=180.0,
+            )
+
+        callbacks = []
+        with (patch("radiostudio.ui.playback.read_track_metadata",
+                    side_effect=metadata_for) as read_metadata,
+              patch("radiostudio.ui.playback.format_broadcast_title", side_effect=lambda _fmt, metadata, _station: metadata.display_title),
+              patch("radiostudio.ui.playback.QTimer.singleShot",
+                    side_effect=lambda _delay, callback: callbacks.append(callback)),
+              patch("radiostudio.ui.playback._logger.exception")):
+            PlaybackMixin.finish_media_end_transition(player, (0, 0, first))
+            self.assertEqual(player.current_index, 1)
+
+            # The second deck is the old physical player after the first swap.
+            # Prepare it for the third queue item, then deliver EndOfMedia again.
+            player.mix_player._source = QUrl.fromLocalFile(third)
+            player.mix_player._position = 125000
+            player.mix_player._state = QMediaPlayer.PlayingState
+            player.mix_player._status = QMediaPlayer.LoadedMedia
+            player.mix_target_index = 2
+            player.player._position = player.player.duration()
+            player.player._state = QMediaPlayer.StoppedState
+            player.player._status = QMediaPlayer.EndOfMedia
+
+            PlaybackMixin.schedule_media_end_transition(player)
+            self.assertEqual(len(callbacks), 1)
+            callbacks.pop(0)()
+
+        self.assertEqual(read_metadata.call_count, 2)
+        self.assertEqual(player.current_index, 2)
+        self.assertEqual(player.on_air.title.text(), "Third")
+        self.assertEqual(player.position_label.text, "02:05 / 03:00")
+
+    def test_end_without_prepared_mix_starts_the_third_queue_item(self):
+        player = _PromotionHarness()
+        with tempfile.TemporaryDirectory(prefix="radiostudio-playback-queue-") as folder:
+            paths = [Path(folder) / f"track-{index}.mp3" for index in range(3)]
+            for path in paths:
+                path.write_bytes(b"test")
+            player.tracks = [str(path) for path in paths]
+            player.track_sources = ["manual"] * 3
+            player.player = _DisplayPlayer(
+                str(paths[1]), 180000, 180000,
+                QMediaPlayer.StoppedState, QMediaPlayer.EndOfMedia)
+            player.mix_player = _DisplayPlayer(
+                "", 0, 0, QMediaPlayer.StoppedState, QMediaPlayer.NoMedia)
+            player.current_index = 1
+            player.mix_target_index = -1
+            player._pending_media_end = (0, 1, str(paths[1]))
+            player._media_end_generation = 0
+            player.stop_pending = False
+            player.is_quitting = False
+            player.pending_transition_kind = None
+            player.pending_transition_action = None
+            player.transition_timer = _FakeTimer()
+            player.gain_ramps = {}
+            player.gain_timer = _FakeTimer()
+            player.audio_decode_fallback = _FakeDecodeFallback()
+            player.audio_fallback_attempts = {}
+            player.autodj_config = {"enabled": False}
+            player.auto_transitions_enabled = False
+            player.fade_out_ms = 0
+            player.main_gain = 1.0
+            player.gain_paused_at = None
+            player.played_indexes = []
+            player.play_index = lambda index, *args, **kwargs: player.played_indexes.append(index)
+
+            PlaybackMixin.finish_media_end_transition(
+                player, (0, 1, str(paths[1])))
+
+        self.assertEqual(player.played_indexes, [2])
+
     def test_changing_main_media_flushes_queued_audio_from_previous_track(self):
         player = _PlaybackHarness()
 
@@ -272,6 +603,171 @@ class PlaybackErrorTests(unittest.TestCase):
         self.assertEqual(player.broadcast.cleared_sources, [("main", True)])
         self.assertEqual(player.broadcast.removed_sources, [])
         self.assertEqual(player.player.source().toLocalFile(), "next-track.mp3")
+
+    def test_active_deck_resynchronizes_on_air_title_and_remaining_time(self):
+        player = _DisplayHarness()
+        player.on_air._track_path = "old-track.mp3"
+        metadata = SimpleNamespace(display_title="Faixa nova", duration=180.0)
+
+        with patch("radiostudio.ui.playback.read_track_metadata", return_value=metadata):
+            PlaybackMixin.refresh_playback_display(player)
+
+        self.assertEqual(player.on_air.title.text(), "Faixa nova")
+        self.assertEqual(player.on_air._track_path, "next-track.mp3")
+        self.assertEqual(player.on_air.progress, (125000, 180000))
+        self.assertEqual(player.position_label.text, "02:05 / 03:00")
+        self.assertEqual(player.position.value, 125000)
+
+    def test_windows_path_normalization_does_not_restart_waveform_analysis(self):
+        player = _DisplayHarness()
+        path = r"C:\Music\next-track.mp3"
+        player.player = _DisplayPlayer(path, 180000, 125000)
+        player.tracks = [path]
+        player.on_air._track_path = path
+        player.on_air.title.setText("Faixa nova")
+        player._display_sync_path = path
+        player._display_sync_metadata = SimpleNamespace(
+            display_title="Faixa nova", duration=180.0)
+
+        with patch("radiostudio.ui.playback.read_track_metadata") as read_metadata:
+            PlaybackMixin.refresh_playback_display(player)
+
+        read_metadata.assert_not_called()
+        self.assertEqual(player.on_air._track_path, path)
+        self.assertEqual(player.position_label.text, "02:05 / 03:00")
+
+    def test_refresh_recovers_missed_end_signal_when_mix_is_already_audible(self):
+        player = _PromotionHarness()
+        metadata = SimpleNamespace(
+            display_title="Faixa nova", path="next-track.mp3", duration=180.0)
+        callbacks = []
+
+        with (patch("radiostudio.ui.playback.read_track_metadata", return_value=metadata),
+              patch("radiostudio.ui.playback.format_broadcast_title", return_value="Faixa nova"),
+              patch("radiostudio.ui.playback.QTimer.singleShot",
+                    side_effect=lambda _delay, callback: callbacks.append(callback)),
+              patch("radiostudio.ui.playback._logger.exception")):
+            PlaybackMixin.refresh_playback_display(player)
+            self.assertEqual(len(callbacks), 1)
+            callbacks[0]()
+
+        self.assertEqual(player.current_index, 1)
+        self.assertEqual(player.on_air.title.text(), "Faixa nova")
+        self.assertEqual(player.position_label.text, "02:05 / 03:00")
+
+    def test_stale_visualizer_does_not_block_missed_end_recovery(self):
+        player = _PromotionHarness()
+        player.on_air._track_path = "another-stale-track.mp3"
+        callbacks = []
+
+        with (patch("radiostudio.ui.playback.read_track_metadata",
+                    return_value=SimpleNamespace(
+                        display_title="Faixa nova", path="next-track.mp3", duration=180.0)),
+              patch("radiostudio.ui.playback.format_broadcast_title", return_value="Faixa nova"),
+              patch("radiostudio.ui.playback.QTimer.singleShot",
+                    side_effect=lambda _delay, callback: callbacks.append(callback)),
+              patch("radiostudio.ui.playback._logger.exception")):
+            PlaybackMixin.refresh_playback_display(player)
+            self.assertEqual(len(callbacks), 1)
+            callbacks[0]()
+
+        self.assertEqual(player.current_index, 1)
+        self.assertEqual(player.on_air.title.text(), "Faixa nova")
+
+    def test_refresh_advances_when_backend_stops_at_end_without_a_mix(self):
+        player = _PromotionHarness()
+        player.mix_target_index = -1
+        player.next_calls = 0
+        player.next_track = lambda: setattr(player, "next_calls", player.next_calls + 1)
+        callbacks = []
+
+        with patch("radiostudio.ui.playback.QTimer.singleShot",
+                   side_effect=lambda _delay, callback: callbacks.append(callback)):
+            PlaybackMixin.refresh_playback_display(player)
+            self.assertEqual(len(callbacks), 1)
+            callbacks[0]()
+
+        self.assertEqual(player.next_calls, 1)
+
+    def test_short_track_at_position_zero_is_not_mistaken_for_end(self):
+        player = _PromotionHarness()
+        player.player = _DisplayPlayer(
+            "old-track.mp3", 100, 0, QMediaPlayer.StoppedState,
+            QMediaPlayer.LoadedMedia)
+
+        self.assertFalse(PlaybackMixin._main_track_reached_end(player))
+
+    def test_stopped_player_after_manual_stop_is_not_restarted_by_end_recovery(self):
+        player = _PromotionHarness()
+        player._suppress_end_recovery = True
+        player.player._status = QMediaPlayer.EndOfMedia
+
+        self.assertFalse(PlaybackMixin._main_track_reached_end(player))
+
+    def test_late_end_signal_after_manual_stop_is_ignored(self):
+        player = _PlaybackHarness()
+        player.current_index = 0
+        player.tracks = ["bad-track.mp3", "next-track.mp3"]
+        player.mix_target_index = -1
+        player.stop_pending = False
+        player.is_quitting = False
+        player._suppress_end_recovery = True
+        player._media_end_generation = 0
+        player._pending_media_end = None
+
+        with patch("radiostudio.ui.playback.QTimer.singleShot") as single_shot:
+            PlaybackMixin.media_status_changed(player, QMediaPlayer.EndOfMedia)
+
+        single_shot.assert_not_called()
+        self.assertIsNone(player._pending_media_end)
+
+    def test_stale_visualizer_path_does_not_block_end_recovery(self):
+        player = _PromotionHarness()
+        player.on_air._track_path = "stale-track.mp3"
+
+        self.assertTrue(PlaybackMixin._main_track_reached_end(player))
+
+    def test_title_recovers_when_visualizer_path_marker_is_already_current(self):
+        player = _DisplayHarness()
+        player.on_air._track_path = "next-track.mp3"
+        player.on_air.title.setText("Faixa antiga")
+        player.on_air.title.setToolTip("Faixa antiga")
+        metadata = SimpleNamespace(display_title="Faixa nova", duration=180.0)
+
+        with patch("radiostudio.ui.playback.read_track_metadata", return_value=metadata):
+            PlaybackMixin.refresh_playback_display(player)
+
+        self.assertEqual(player.on_air.title.text(), "Faixa nova")
+        self.assertEqual(player.on_air.title.tooltip, "Faixa nova")
+
+    def test_playing_signal_immediately_resynchronizes_title_and_time(self):
+        player = _DisplayHarness()
+        player.on_air._track_path = "next-track.mp3"
+        player.on_air.title.setText("Faixa antiga")
+        metadata = SimpleNamespace(display_title="Faixa nova", duration=180.0)
+
+        with patch("radiostudio.ui.playback.read_track_metadata", return_value=metadata):
+            PlaybackMixin.playback_state_changed(player, QMediaPlayer.PlayingState)
+
+        self.assertEqual(player.on_air.title.text(), "Faixa nova")
+        self.assertEqual(player.position_label.text, "02:05 / 03:00")
+        self.assertEqual(player.position.value, 125000)
+
+    def test_mix_promotion_updates_display_before_broadcast_cleanup(self):
+        player = _PromotionHarness()
+        metadata = SimpleNamespace(
+            display_title="Faixa nova", path="next-track.mp3", duration=180.0)
+
+        with (patch("radiostudio.ui.playback.read_track_metadata", return_value=metadata),
+              patch("radiostudio.ui.playback.format_broadcast_title", return_value="Faixa nova"),
+              patch("radiostudio.ui.playback._logger.exception")):
+            PlaybackMixin.promote_mix_player(player)
+
+        self.assertEqual(player.current_index, 1)
+        self.assertEqual(player.on_air.title.text(), "Faixa nova")
+        self.assertEqual(player.on_air.progress, (125000, 180000))
+        self.assertEqual(player.position_label.text, "02:05 / 03:00")
+        self.assertTrue(any(kind == "error" for kind, _message in player.events))
 
     def test_mix_gain_ramps_use_equal_power_curve(self):
         player = _GainHarness()

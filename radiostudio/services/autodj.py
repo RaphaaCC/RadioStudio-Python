@@ -8,6 +8,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from .audio_paths import audio_path_key
+
 
 DAY_NAMES = ("Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom")
 FILTER_FIELDS = ("title", "artist", "album", "albumartist", "genre", "composer", "year", "path")
@@ -85,7 +87,7 @@ def reserve_track(history, track, *, now=None) -> None:
     except (TypeError, ValueError, OverflowError):
         timestamp = time.time()
     last_paths, last_artists = history
-    path = str(track.get("path", "")).casefold()
+    path = audio_path_key(track.get("path", ""))
     if path:
         last_paths[path] = timestamp
     artist = _artist_key(track)
@@ -152,9 +154,9 @@ def choose_track(tracks, history, *, artist_cooldown_minutes=0,
             now = time.time()
     except (TypeError, ValueError, OverflowError):
         now = time.time()
-    excluded = {str(path).casefold() for path in excluded_paths}
+    excluded = {audio_path_key(path) for path in excluded_paths}
     candidates = [track for track in tracks if isinstance(track, dict)
-                  if str(track.get("path", "")).casefold() not in excluded]
+                  if audio_path_key(track.get("path", "")) not in excluded]
     if not candidates and excluded:
         # A tiny library may have fewer tracks than the queue target. Repeats in a
         # queue are still avoided; the caller can try again after playback advances.
@@ -173,7 +175,7 @@ def choose_track(tracks, history, *, artist_cooldown_minutes=0,
     artist_window = cooldown(artist_cooldown_minutes)
 
     def recent(track, window):
-        played = last_paths.get(str(track.get("path", "")).casefold())
+        played = last_paths.get(audio_path_key(track.get("path", "")))
         return bool(window and played is not None and played > 0 and now - played < window)
 
     def artist_recent(track):
@@ -202,7 +204,7 @@ def choose_track(tracks, history, *, artist_cooldown_minutes=0,
     # Rotate toward tracks least recently heard, with random choice among the oldest
     # portion so shuffled libraries remain lively and deterministic ties do not form.
     def last_played(track):
-        return last_paths.get(str(track.get("path", "")).casefold(), 0)
+        return last_paths.get(audio_path_key(track.get("path", "")), 0)
     eligible.sort(key=last_played)
     if len(eligible) > 1:
         pool_size = max(1, min(len(eligible), math.ceil(len(eligible) * 0.2)))

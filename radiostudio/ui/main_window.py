@@ -30,7 +30,7 @@ from ..services.music_library import MusicLibrary
 from ..services.audio_inputs import AudioInputController, INPUT_CHANNELS
 from ..services.transition_analysis import TransitionAnalyzer
 from ..services.audio_decode_fallback import AudioDecodeFallback
-from ..config import ABOUT_LOGO_FILE
+from ..config import ABOUT_LOGO_FILE, APP_NAME, APP_VERSION
 from .icons import app_icon, apply_app_icon
 
 
@@ -112,6 +112,7 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         self.mix_failed_key = None
         self.silence_ms = 0
         self.stop_pending = False
+        self._suppress_end_recovery = False
         self.last_playback = {"path": "", "position_ms": 0, "was_playing": False}
         self.pending_resume_position = None
         self.last_position_save_at = 0.0
@@ -405,6 +406,7 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         self.statusBar().showMessage("Pronto")
         self.clock_timer = QTimer(self)
         self.clock_timer.timeout.connect(self.clock.update_time)
+        self.clock_timer.timeout.connect(self.refresh_playback_display)
         self.clock_timer.start(1000)
         music_folder = QStandardPaths.writableLocation(QStandardPaths.MusicLocation)
         self.open_explorer_folder(
@@ -491,12 +493,12 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         add(preferences, "Preferências...", self.show_settings, "Ctrl+P")
 
         help_menu = bar.addMenu("A&juda")
-        add(help_menu, f"Sobre o {APP_DISPLAY_NAME}", self.show_about)
+        add(help_menu, f"Sobre o {APP_NAME}", self.show_about)
 
     @guarded
     def show_about(self):
         dialog = QDialog(self)
-        dialog.setWindowTitle(f"Sobre o {APP_DISPLAY_NAME}")
+        dialog.setWindowTitle("Sobre")
         apply_app_icon(dialog)
         dialog.setMinimumWidth(500)
         layout = QVBoxLayout(dialog)
@@ -512,7 +514,8 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
             layout.addWidget(logo)
 
         details = QLabel(
-            f"<b>{APP_DISPLAY_NAME}</b><br>"
+            f"<b>{APP_NAME}</b><br>"
+            f"Versão: {APP_VERSION}<br><br>"
             "Automação de áudio, playlist e transmissão.<br><br>"
             "Desenvolvido por Raemi Labs<br>"
             "Autor: Raphael Cherfem Carlini<br>"
@@ -543,7 +546,7 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         self.tray_icon = QSystemTrayIcon(icon, self)
         self.tray_icon.setToolTip(APP_DISPLAY_NAME)
         tray_menu = QMenu(self)
-        tray_menu.addAction("Abrir RadioStudio Python", self.restore_window)
+        tray_menu.addAction(f"Abrir {APP_NAME}", self.restore_window)
         tray_menu.addSeparator()
         tray_menu.addAction("Reproduzir / Pausar", self.toggle_playback)
         tray_menu.addAction("Próxima faixa", self.next_track)

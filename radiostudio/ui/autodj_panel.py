@@ -210,7 +210,8 @@ class AutoDJPanel(QWidget):
         self.status.setWordWrap(True)
         header.addWidget(self.status, 1)
         self.fill_button = QPushButton("🎲 Completar fila")
-        self.fill_button.clicked.connect(self.main_window.fill_autodj_queue)
+        self.fill_button.clicked.connect(
+            lambda _checked=False: self.main_window.fill_autodj_queue(force=True))
         header.addWidget(self.fill_button)
         root.addLayout(header)
 
@@ -366,7 +367,7 @@ class AutoDJPanel(QWidget):
         self.library.update_library(library_id, enabled=item.checkState() == Qt.Checked)
         self.refresh_programs(); self.main_window.save_state()
         self.main_window.autodj_last_signature = None
-        self.main_window.fill_autodj_queue()
+        self.main_window.fill_autodj_queue(bypass_throttle=True)
 
     @guarded
     def add_library(self):
@@ -421,7 +422,7 @@ class AutoDJPanel(QWidget):
             self.main_window.log_event("info", f"Biblioteca examinada: {added} faixa(s) atualizada(s), {errors} erro(s).")
         self.refresh_libraries(); self.main_window.save_state()
         self.main_window.autodj_last_signature = None
-        self.main_window.fill_autodj_queue()
+        self.main_window.fill_autodj_queue(bypass_throttle=True)
 
     @guarded
     def remove_selected(self):
@@ -442,7 +443,7 @@ class AutoDJPanel(QWidget):
             program["library_ids"] = [value for value in selected if value not in ids]
         self.refresh_libraries(); self.main_window.save_state()
         self.main_window.autodj_last_signature = None
-        self.main_window.fill_autodj_queue()
+        self.main_window.fill_autodj_queue(bypass_throttle=True)
 
     @guarded
     def refresh_programs(self):
@@ -495,7 +496,8 @@ class AutoDJPanel(QWidget):
         if dialog.exec() == QDialog.Accepted:
             self.main_window.autodj_programs.append(dialog.value())
             self.refresh_programs(); self.main_window.save_state()
-            self.main_window.autodj_last_signature = None; self.main_window.fill_autodj_queue()
+            self.main_window.autodj_last_signature = None
+            self.main_window.fill_autodj_queue(bypass_throttle=True)
 
     def _selected_program_row(self):
         return self.program_table.currentRow()
@@ -510,7 +512,8 @@ class AutoDJPanel(QWidget):
         if dialog.exec() == QDialog.Accepted:
             self.main_window.autodj_programs[row] = dialog.value(current)
             self.refresh_programs(); self.main_window.save_state()
-            self.main_window.autodj_last_signature = None; self.main_window.fill_autodj_queue()
+            self.main_window.autodj_last_signature = None
+            self.main_window.fill_autodj_queue(bypass_throttle=True)
 
     @guarded
     def delete_program(self):
@@ -518,7 +521,8 @@ class AutoDJPanel(QWidget):
         if row >= 0:
             del self.main_window.autodj_programs[row]
             self.refresh_programs(); self.main_window.save_state()
-            self.main_window.autodj_last_signature = None; self.main_window.fill_autodj_queue()
+            self.main_window.autodj_last_signature = None
+            self.main_window.fill_autodj_queue(bypass_throttle=True)
 
     @guarded
     def refresh_history(self):

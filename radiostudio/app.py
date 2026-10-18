@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 from .config import APP_DIR, APP_DISPLAY_NAME, APP_ICON_FILE, APP_NAME, INSTANCE_NAME
 from .runtime_safety import configure_exception_logging, guarded
 from .ui.main_window import RadioStudio
+from .ui.icons import apply_app_icon
 
 
 def set_windows_app_id() -> None:
@@ -78,4 +79,5 @@ def main() -> int:
             window.restore_window()
         instance_server.newConnection.connect(guarded(reopen_existing_window))
     window.show()
+    apply_app_icon(window)
     return app.exec()

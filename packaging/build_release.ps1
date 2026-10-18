@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $python = Join-Path $root ".venv\Scripts\python.exe"
@@ -17,8 +17,9 @@ $releaseDir = Join-Path $root "release"
 $buildDir = Join-Path $root "build"
 $configDir = Join-Path $buildDir "release-config"
 $distDir = Join-Path $buildDir "dist"
-$portableName = "RadioStudio-Python (1.0.0 Sirius Beta) - Portable.exe"
-$setupName = "RadioStudio-Python (1.0.0 Sirius Beta) - Setup.exe"
+$portableName = "RadioStudio Python Sirius — v1.0.0 Stable — Portable.exe"
+$portableBuildTitle = "RadioStudio Python Sirius - v1.0.0 Stable - Portable"
+$setupName = "RadioStudio Python Sirius — v1.0.0 Stable — Setup.exe"
 $assetsDir = Join-Path $root "radiostudio\assets"
 $iconFile = Join-Path $assetsDir "icon.ico"
 $portableEntry = Join-Path $root "packaging\portable_entry.py"
@@ -50,10 +51,10 @@ function Write-DeployConfig(
         "--noinclude-qt-translations",
         "--windows-console-mode=disable",
         '--company-name="Raemi Labs"',
-        '--product-name="RadioStudio Python 1.0.0 Sirius Beta"',
+        '--product-name="RadioStudio Python Sirius"',
         "--file-version=1.0.0.0",
         "--product-version=1.0.0.0",
-        '--file-description="RadioStudio Python"',
+        '--file-description="RadioStudio Python Sirius"',
         '--copyright="Copyright (C) 2026 Raemi Labs"',
         "--include-data-dir=`"$assetsDir=radiostudio/assets`"",
         "--include-package-data=keyring",
@@ -122,6 +123,7 @@ try {
     if (-not (Test-Path -LiteralPath $iconFile)) { throw "Ícone do programa ausente: $iconFile" }
 
     Remove-Item -LiteralPath (Join-Path $releaseDir $portableName) -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path $releaseDir "$portableBuildTitle.exe") -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath (Join-Path $releaseDir $setupName) -Force -ErrorAction SilentlyContinue
     Remove-BuildDirectory (Join-Path $distDir "RadioStudio Python")
     Remove-BuildDirectory (Join-Path $distDir "RadioStudio Python.dist")
@@ -156,12 +158,17 @@ try {
     Remove-BuildDirectory $testProfile
 
     $portableConfig = Join-Path $configDir "portable.pysidedeploy.spec"
-    Write-DeployConfig $portableConfig "RadioStudio-Python (1.0.0 Sirius Beta) - Portable" `
+    Write-DeployConfig $portableConfig $portableBuildTitle `
         $portableEntry $releaseDir "onefile"
     & $deploy -c $portableConfig --mode onefile --no-install --no-warn
     if ($LASTEXITCODE -ne 0) { throw "Falha ao compilar o executável portátil (pyside6-deploy: $LASTEXITCODE)." }
 
     $portableExe = Join-Path $releaseDir $portableName
+    $compiledPortableExe = Join-Path $releaseDir "$portableBuildTitle.exe"
+    if (-not (Test-Path -LiteralPath $compiledPortableExe)) {
+        throw "Executável portátil compilado não encontrado: $compiledPortableExe"
+    }
+    Move-Item -LiteralPath $compiledPortableExe -Destination $portableExe
     if (-not (Test-Path -LiteralPath $portableExe)) { throw "Executável portátil não encontrado: $portableExe" }
 
     $smokeDir = Join-Path $buildDir "portable-smoke"

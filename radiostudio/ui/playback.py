@@ -1,10 +1,15 @@
 """Playback operations for the main window."""
 
+import logging
+
 from ._shared import *
 from ..runtime_safety import guarded
+from ..services.audio_paths import same_audio_path
 from ..services.transition_analysis import (
     bounded_transition_duration_ms, equal_power_gains, plan_automatic_transition,
 )
+
+_logger = logging.getLogger("radiostudio")
 
 
 class PlaybackMixin:
@@ -14,7 +19,8 @@ class PlaybackMixin:
 
     @guarded
     def schedule_media_end_transition(self):
-        if (self.stop_pending or self.is_quitting
+        if (getattr(self, "_suppress_end_recovery", False)
+                or self.stop_pending or self.is_quitting
                 or getattr(self, "_pending_media_end", None) is not None
                 or not 0 <= self.current_index < len(self.tracks)):
             return
@@ -32,10 +38,22 @@ class PlaybackMixin:
         self._pending_media_end = None
         _generation, index, path = expected
         if (self.is_quitting or self.stop_pending or index != self.current_index
-                or not 0 <= index < len(self.tracks) or self.tracks[index] != path
-                or self.original_media_path(self.player) != path):
+                or not 0 <= index < len(self.tracks)
+                or not same_audio_path(self.tracks[index], path)
+                or not same_audio_path(self.original_media_path(self.player), path)):
             return
-        if (self.mix_target_index >= 0
+        # EndOfMedia can be queued while Qt is switching to another source.
+        # Re-check the active deck after the deferred callback so a stale signal
+        # cannot skip a newly loaded track (especially a duplicate queue path).
+        if not self._main_track_reached_end():
+            return
+        target = self.mix_target_index
+        mix_matches_queue = (
+            target == index + 1
+            and 0 <= target < len(self.tracks)
+            and same_audio_path(self.original_media_path(self.mix_player), self.tracks[target])
+        )
+        if (mix_matches_queue
                 and self.mix_player.playbackState() == QMediaPlayer.PlayingState):
             self.promote_mix_player()
         else:
@@ -54,7 +72,7 @@ class PlaybackMixin:
     def original_media_path(self, player):
         decoded = self.decoded_audio_sources.get(player)
         current = player.source().toLocalFile()
-        if decoded and current == decoded[1]:
+        if decoded and same_audio_path(current, decoded[1]):
             return decoded[0]
         return current
 
@@ -77,9 +95,9 @@ class PlaybackMixin:
 
     def try_decode_fallback(self, player, path, callback):
         decoded = self.decoded_audio_sources.get(player)
-        if decoded and player.source().toLocalFile() == decoded[1]:
+        if decoded and same_audio_path(player.source().toLocalFile(), decoded[1]):
             return False
-        if self.audio_fallback_attempts.get(player) == path:
+        if same_audio_path(self.audio_fallback_attempts.get(player, ""), path):
             return self.audio_decode_fallback.is_pending(player)
         self.audio_fallback_attempts[player] = path
         if not Path(path).is_file():
@@ -100,8 +118,8 @@ class PlaybackMixin:
     def main_decode_fallback_ready(self, player, source, decoded_path, error):
         if (self.is_quitting or player is not self.player
                 or not 0 <= self.current_index < len(self.tracks)
-                or self.tracks[self.current_index] != source
-                or player.source().toLocalFile() != source):
+                or not same_audio_path(self.tracks[self.current_index], source)
+                or not same_audio_path(player.source().toLocalFile(), source)):
             if decoded_path:
                 self.audio_decode_fallback.release(decoded_path, delay_ms=0)
             return
@@ -119,8 +137,9 @@ class PlaybackMixin:
     def mix_decode_fallback_ready(self, player, source, decoded_path, error):
         index = self.mix_target_index
         if (self.is_quitting or player is not self.mix_player or index < 0
-                or not 0 <= index < len(self.tracks) or self.tracks[index] != source
-                or player.source().toLocalFile() != source):
+                or not 0 <= index < len(self.tracks)
+                or not same_audio_path(self.tracks[index], source)
+                or not same_audio_path(player.source().toLocalFile(), source)):
             if decoded_path:
                 self.audio_decode_fallback.release(decoded_path, delay_ms=0)
             return
@@ -182,6 +201,7 @@ class PlaybackMixin:
             self.gain_timer.stop()
         self.stop_pending = False
         self.current_index = index
+        self._suppress_end_recovery = False
         self.silence_ms = 0
         if self.auto_transitions_enabled:
             self.request_transition_analysis(path)
@@ -196,9 +216,9 @@ class PlaybackMixin:
         self.set_media_source(self.player, path)
         self.pending_resume_position = max(0, int(resume_position_ms)) or None
         metadata = read_track_metadata(path)
+        self._display_sync_path = path
+        self._display_sync_metadata = metadata
         self.pending_track_log = metadata.display_title
-        self.player.play()
-        self.apply_pending_resume_position()
         self.on_air.show_track(metadata.display_title, path)
         if self.tray_icon:
             self.tray_icon.setToolTip(f"{APP_DISPLAY_NAME} — {metadata.display_title[:80]}")
@@ -206,6 +226,8 @@ class PlaybackMixin:
             self.station_metadata["title_format"], metadata, self.station_metadata))
         self.playlist.selectRow(index)
         self.statusBar().showMessage(f"Reproduzindo: {path}")
+        self.player.play()
+        self.apply_pending_resume_position()
 
     @guarded
     def pause(self):
@@ -269,6 +291,7 @@ class PlaybackMixin:
         self.cancel_pending_media_end()
         self.cancel_transition_action()
         self.stop_pending = False
+        self._suppress_end_recovery = True
         self.pending_track_log = None
         self.pending_resume_position = None
         self.fade_in_pending_ms = 0
@@ -392,10 +415,12 @@ class PlaybackMixin:
 
     @guarded
     def playback_state_changed(self, state):
-        if state == QMediaPlayer.PlayingState and self.pending_track_log:
-            self.log_event("music", self.pending_track_log)
-            self.record_track_started(self.original_media_path(self.player))
-            self.pending_track_log = None
+        if state == QMediaPlayer.PlayingState:
+            self.refresh_playback_display()
+            if self.pending_track_log:
+                self.log_event("music", self.pending_track_log)
+                self.record_track_started(self.original_media_path(self.player))
+                self.pending_track_log = None
         if not self.is_quitting:
             self.save_state()
 
@@ -697,30 +722,49 @@ class PlaybackMixin:
         self.mix_fade_out_duration_ms = 0
         self.mix_fade_started = False
         self.mix_cue_ms = 0
-        self.fade_in_pending_ms = 0
-        self.pending_main_cue_ms = 0
         self.current_index = next_index
         self.main_gain = 1.0
         self.mix_gain = 0.0
         self.gain_ramps.pop("main", None)
         self.gain_ramps.pop("mix", None)
-        self.apply_main_volume()
-        self.mix_audio.setVolume(0.0)
-        self.mix_player.stop()
-        self.broadcast.promote_source("mix", "main")
+        self.fade_in_pending_ms = 0
+        self.pending_main_cue_ms = 0
+
+        # Commit the visible track state immediately after the deck swap. Audio
+        # device and broadcast cleanup are independent and must not leave the
+        # interface showing the outgoing track if one of them fails.
         metadata = read_track_metadata(self.tracks[self.current_index])
+        self._display_sync_path = self.tracks[self.current_index]
+        self._display_sync_metadata = metadata
         self.pending_track_log = metadata.display_title
         self.on_air.show_track(metadata.display_title, self.tracks[self.current_index])
+        self.playlist.selectRow(self.current_index)
+        self.silence_ms = 0
+        self.apply_pending_resume_position()
+        self.refresh_playback_display()
+
+        try:
+            self.apply_main_volume()
+        except Exception:
+            _logger.exception("Falha ao atualizar o volume após promover a faixa")
+        try:
+            self.mix_audio.setVolume(0.0)
+        except Exception:
+            _logger.exception("Falha ao silenciar o deck antigo após o Mix")
+        try:
+            self.mix_player.stop()
+        except Exception:
+            _logger.exception("Falha ao parar o deck antigo após o Mix")
+        try:
+            self.broadcast.promote_source("mix", "main")
+        except Exception:
+            _logger.exception("Falha ao promover a fonte de áudio do Mix")
+            self.log_event("error", "A faixa mudou, mas houve uma falha ao atualizar a fonte da transmissão.")
         self.broadcast.set_title(format_broadcast_title(
             self.station_metadata["title_format"], metadata, self.station_metadata))
         self.log_event("music", metadata.display_title)
         self.record_track_started(metadata.path)
         self.pending_track_log = None
-        self.playlist.selectRow(self.current_index)
-        self.update_duration(self.player.duration())
-        self.update_position(self.player.position())
-        self.silence_ms = 0
-        self.apply_pending_resume_position()
         self.save_state()
 
     @guarded
@@ -803,6 +847,87 @@ class PlaybackMixin:
         self.position.setRange(0, value)
         self.update_position(self.player.position())
         self.apply_pending_resume_position()
+
+    def _main_track_reached_end(self):
+        if getattr(self, "_suppress_end_recovery", False):
+            return False
+        if not 0 <= self.current_index < len(self.tracks):
+            return False
+        path = self.tracks[self.current_index]
+        if not same_audio_path(self.original_media_path(self.player), path):
+            return False
+
+        status = self.player.mediaStatus()
+        if status == QMediaPlayer.EndOfMedia:
+            return True
+        if status in (QMediaPlayer.NoMedia, QMediaPlayer.LoadingMedia,
+                      QMediaPlayer.InvalidMedia):
+            return False
+        state = self.player.playbackState()
+        if state == QMediaPlayer.PausedState:
+            return False
+
+        duration = max(0, int(self.player.duration()))
+        position = max(0, int(self.player.position()))
+        end_tolerance = min(250, duration * 0.1)
+        at_end = duration > 0 and position >= duration - end_tolerance
+        if not at_end:
+            return False
+        if state == QMediaPlayer.StoppedState:
+            # A backend can stop at the end without delivering EndOfMedia.
+            return True
+
+        # If the backend still reports Playing, only an already-playing Mix
+        # deck matching the next queue row proves that playback crossed tracks.
+        target = self.mix_target_index
+        return (
+            target == self.current_index + 1
+            and 0 <= target < len(self.tracks)
+            and same_audio_path(self.original_media_path(self.mix_player), self.tracks[target])
+            and self.mix_player.playbackState() == QMediaPlayer.PlayingState
+        )
+
+    @guarded
+    def refresh_playback_display(self):
+        """Resync the on-air display from the active deck as a signal-race fallback."""
+        if self._main_track_reached_end():
+            self.schedule_media_end_transition()
+        if self.player.playbackState() == QMediaPlayer.StoppedState:
+            return
+        path = self.original_media_path(self.player)
+        if not path:
+            return
+
+        cached_path = getattr(self, "_display_sync_path", "")
+        metadata = getattr(self, "_display_sync_metadata", None)
+        if not same_audio_path(cached_path, path) or metadata is None:
+            metadata = read_track_metadata(path)
+            self._display_sync_path = path
+            self._display_sync_metadata = metadata
+        if not same_audio_path(getattr(self.on_air, "_track_path", ""), path):
+            self.on_air.show_track(metadata.display_title, path)
+        else:
+            # Keep the visible title independent from the waveform worker's
+            # internal path marker. A partial/failed UI update must not freeze
+            # the title while the player and queue have already moved on.
+            title_widget = getattr(self.on_air, "title", None)
+            title_text = getattr(title_widget, "text", None)
+            if callable(title_text) and title_text() != metadata.display_title:
+                title_widget.setText(metadata.display_title)
+                title_widget.setToolTip(metadata.display_title)
+
+        duration = max(0, int(self.player.duration()))
+        if duration <= 0 and metadata.duration > 0:
+            duration = round(metadata.duration * 1000)
+        position = max(0, int(self.player.position()))
+        if duration > 0:
+            position = min(position, duration)
+        self.position.setRange(0, duration)
+        if not self.position.isSliderDown():
+            self.position.setValue(position)
+        self.position_label.setText(
+            f"{clock_text(position)} / {clock_text(duration)}")
+        self.on_air.set_progress(position, duration)
 
     @guarded
     def apply_pending_resume_position(self):

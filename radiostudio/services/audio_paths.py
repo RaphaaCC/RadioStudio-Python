@@ -1,0 +1,25 @@
+"""Path identity helpers for local audio files."""
+
+from __future__ import annotations
+
+import os
+
+
+def audio_path_key(path) -> str:
+    """Return a stable identity for a local path on the current OS."""
+    if not path:
+        return ""
+    try:
+        return os.path.normcase(os.path.normpath(os.fspath(path)))
+    except (TypeError, ValueError):
+        return str(path)
+
+
+def same_audio_path(left, right) -> bool:
+    """Compare local paths after applying the host OS path normalization.
+
+    Qt's QUrl.toLocalFile() returns forward slashes on Windows even when the
+    playlist stores the same path with backslashes. Raw string comparisons can
+    then miss playback end events and repeatedly restart waveform analysis.
+    """
+    return audio_path_key(left) == audio_path_key(right)

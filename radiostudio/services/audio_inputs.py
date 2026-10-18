@@ -452,7 +452,9 @@ class AudioInputController(QObject):
         self.monitor_format = None
         self.monitor_pending.clear()
         for buffer in self.monitor_buffers.values():
-            buffer.take(buffer.length)
+            # `take()` intentionally returns startup silence until the buffer is
+            # primed, so a short tail can survive a monitor restart and play late.
+            buffer.clear()
         if sink:
             try:
                 sink.stop()

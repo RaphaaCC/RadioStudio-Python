@@ -5,6 +5,7 @@ import time
 
 from ._shared import *
 from ..runtime_safety import guarded
+from ..services.audio_paths import audio_path_key
 from ..services.autodj import (
     active_program, choose_track, filter_tracks, program_signature, reserve_track,
 )
@@ -38,11 +39,12 @@ class AutoDJControllerMixin:
             self.autodj_panel.set_status("AutoDJ desligado; a fila atual continua disponível.")
 
     @guarded
-    def fill_autodj_queue(self, force=False, allow_current_repeat=False):
+    def fill_autodj_queue(self, force=False, allow_current_repeat=False,
+                          bypass_throttle=False):
         if not hasattr(self, "music_library") or not hasattr(self, "autodj_panel"):
             return
         now_mono = time.monotonic()
-        if not force and now_mono - self.autodj_last_fill < 3:
+        if not force and not bypass_throttle and now_mono - self.autodj_last_fill < 3:
             return
         self.autodj_last_fill = now_mono
 
@@ -96,7 +98,7 @@ class AutoDJControllerMixin:
         history = (dict(raw_history[0]), dict(raw_history[1]))
         selection_time = time.time()
         candidate_by_path = {
-            str(track.get("path", "")).casefold(): track
+            audio_path_key(track.get("path", "")): track
             for track in candidates if isinstance(track, dict) and track.get("path")
         }
         # Cooldowns must also cover the current/upcoming queue. Without this,
@@ -104,7 +106,7 @@ class AutoDJControllerMixin:
         # because none of those future tracks has reached play_history yet.
         queued_from = max(0, self.current_index)
         for queued_path in self.tracks[queued_from:]:
-            queued_track = candidate_by_path.get(str(queued_path).casefold())
+            queued_track = candidate_by_path.get(audio_path_key(queued_path))
             if queued_track:
                 reserve_track(history, queued_track, now=selection_time)
 
@@ -153,6 +155,17 @@ class AutoDJControllerMixin:
                    if source == "autodj" and index > keep_current]
         if not removed:
             return
+        next_index = self.current_index + 1
+        transition_target_invalidated = (
+            (self.mix_target_index >= 0
+             and any(index <= self.mix_target_index for index in removed))
+            or (getattr(self, "pending_transition_kind", None) == "advance"
+                and any(index <= next_index for index in removed)))
+        if transition_target_invalidated:
+            # A playing secondary deck or fade callback still refers to the
+            # old queue index. Cancel it before replacing generated rows so it
+            # cannot promote audio from a removed track under a new row's title.
+            self.cancel_pending_transition()
         for index in reversed(removed):
             del self.tracks[index]
             del self.track_sources[index]
