@@ -287,16 +287,50 @@ class MusicLibrary:
             return [dict(row) for row in db.execute(
                 "SELECT * FROM play_history ORDER BY played_at DESC, id DESC LIMIT ?", (int(limit),))]
 
-    def latest_track_plays(self):
+    def history_after_id(self, after_id, limit=1000):
+        """Fetch newly inserted history without copying the full recent page."""
         with self._connect() as db:
-            rows = db.execute("SELECT path, MAX(played_at) AS played_at FROM play_history GROUP BY path")
-            paths = {}
-            for row in rows:
-                key = audio_path_key(row["path"])
-                paths[key] = max(paths.get(key, 0.0), float(row["played_at"]))
-            rows = db.execute("SELECT artist, MAX(played_at) AS played_at FROM play_history "
-                              "WHERE artist<>'' GROUP BY artist COLLATE NOCASE")
-            artists = {str(row["artist"]).casefold(): float(row["played_at"]) for row in rows}
+            return [dict(row) for row in db.execute(
+                "SELECT * FROM play_history WHERE id>? "
+                "ORDER BY played_at DESC, id DESC LIMIT ?",
+                (max(0, int(after_id)), max(1, int(limit))))]
+
+    def latest_track_plays(self, path_window_seconds=None,
+                           artist_window_seconds=None, now=None):
+        """Return latest plays only within the cooldown windows when supplied.
+
+        AutoDJ only needs recent history for its configured repeat windows. A
+        bounded indexed time range avoids grouping the entire retained history
+        every time the queue is replenished. Omitting a window preserves the
+        full-history behavior for older callers.
+        """
+        now = time.time() if now is None else float(now)
+
+        def read_latest(db, column, window, where=""):
+            if window is None:
+                cutoff_clause = ""
+                values = ()
+            else:
+                seconds = max(0.0, float(window))
+                if seconds <= 0:
+                    return {}
+                cutoff_clause = " AND played_at>=?"
+                values = (now - seconds,)
+            group_column = f"{column} COLLATE NOCASE" if column == "artist" else column
+            rows = db.execute(
+                f"SELECT {column}, MAX(played_at) AS played_at FROM play_history "
+                f"WHERE 1=1{where}{cutoff_clause} GROUP BY {group_column}", values)
+            if column == "path":
+                latest = {}
+                for row in rows:
+                    key = audio_path_key(row[column])
+                    latest[key] = max(latest.get(key, 0.0), float(row["played_at"]))
+                return latest
+            return {str(row[column]).casefold(): float(row["played_at"]) for row in rows}
+
+        with self._connect() as db:
+            paths = read_latest(db, "path", path_window_seconds)
+            artists = read_latest(db, "artist", artist_window_seconds, " AND artist<>''")
         return paths, artists
 
     def clear_history(self):

@@ -8,12 +8,14 @@ import tempfile
 from pathlib import Path
 
 APP_NAME = "RadioStudio Python Sirius"
-APP_VERSION = "v1.0.0 Stable"
+APP_VERSION = "v1.0.1 Beta"
 APP_CODENAME = "Sirius"
 APP_DISPLAY_NAME = f"{APP_NAME} — {APP_VERSION}"
 ASSET_DIR = Path(__file__).resolve().parent / "assets"
 APP_ICON_FILE = ASSET_DIR / "icon.ico"
 ABOUT_LOGO_FILE = ASSET_DIR / "logo-about-window.png"
+USER_MANUAL_FILE = ASSET_DIR / "manual_usuario.pdf"
+DISCORD_APPLICATION_ID = "1561176476290908250"
 
 def _app_data_dir() -> Path:
     profile_dir = Path(os.getenv("APPDATA") or Path.home()) / "RadioStudioPython"

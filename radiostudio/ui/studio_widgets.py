@@ -6,6 +6,7 @@ from ..runtime_safety import guarded
 
 from array import array
 from datetime import datetime
+from functools import lru_cache
 import logging
 from math import cos, floor, log10, pi, sin, sqrt
 from pathlib import Path
@@ -14,14 +15,14 @@ import time
 from collections import deque
 
 import imageio_ffmpeg
-from PySide6.QtCore import QProcess, Qt, QRectF, QTimer
-from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPalette, QPen
+from PySide6.QtCore import QProcess, Qt, QRectF, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPalette, QPen, QPixmap
 from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 
 WEEKDAYS = ("Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom")
 MONTHS = ("Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez")
-MAX_WAVE_BYTES = 32 * 1024 * 1024
+MAX_WAVE_BYTES = 16 * 1024 * 1024
 WAVEFORM_STYLES = (
     ("Barras clássicas", "bars"),
     ("Linha suave", "line"),
@@ -37,6 +38,35 @@ WAVEFORM_STYLES = (
 LIVE_WAVEFORM_STYLES = frozenset({"reactive_wave", "spectrum", "spectrum_mirror", "spectrum_line"})
 LIVE_WAVEFORM_MIN_INTERVAL = 1 / 30
 LIVE_SPECTRUM_MIN_INTERVAL = 1 / 15
+
+
+@lru_cache(maxsize=8)
+def _hann_window(size: int) -> tuple[float, ...]:
+    """Reuse the fixed analysis window instead of recalculating thousands of cosines."""
+    if size <= 1:
+        return (1.0,) * max(0, size)
+    scale = 2 * pi / (size - 1)
+    return tuple(0.5 - 0.5 * cos(scale * index) for index in range(size))
+
+
+@lru_cache(maxsize=8)
+def _spectrum_bin_ranges(size: int, sample_rate: int,
+                         band_count: int) -> tuple[tuple[int, int], ...]:
+    """Cache the frequency-to-FFT-bin map for the fixed live-analysis sizes."""
+    nyquist = size // 2
+    min_frequency = 35.0
+    max_frequency = min(16000.0, sample_rate / 2)
+    ratio = max_frequency / min_frequency
+    ranges = []
+    for band in range(band_count):
+        low = max(1, floor(min_frequency * ratio ** (band / band_count)
+                           * size / sample_rate))
+        high = min(nyquist, max(
+            low + 1,
+            floor(min_frequency * ratio ** ((band + 1) / band_count)
+                  * size / sample_rate)))
+        ranges.append((low, high))
+    return tuple(ranges)
 
 
 def minutes_seconds(milliseconds: int) -> str:
@@ -65,17 +95,33 @@ class StudioClock(QFrame):
         layout.addWidget(self.date_label)
         layout.addWidget(self.time_label, 1)
         layout.addWidget(self.hour_label)
+        self._date_text = None
+        self._time_text = None
+        self._hour_text = None
+        self._hour_style = None
         self.update_time()
 
     @guarded
     def update_time(self):
         now = datetime.now()
-        self.date_label.setText(f"{WEEKDAYS[now.weekday()]} {now.day:02} {MONTHS[now.month - 1]} {now.year}")
-        self.time_label.setText(now.strftime("%H:%M:%S"))
+        date_text = f"{WEEKDAYS[now.weekday()]} {now.day:02} {MONTHS[now.month - 1]} {now.year}"
+        if date_text != self._date_text:
+            self._date_text = date_text
+            self.date_label.setText(date_text)
+        time_text = now.strftime("%H:%M:%S")
+        if time_text != self._time_text:
+            self._time_text = time_text
+            self.time_label.setText(time_text)
         remaining = 3600 - now.minute * 60 - now.second
-        self.hour_label.setText(f"Próxima hora em {remaining // 60:02}:{remaining % 60:02}")
+        hour_text = f"Próxima hora em {remaining // 60:02}:{remaining % 60:02}"
+        if hour_text != self._hour_text:
+            self._hour_text = hour_text
+            self.hour_label.setText(hour_text)
         dark = self.palette().color(QPalette.Window).lightness() < 128
-        self.hour_label.setStyleSheet(f"color: {'#70ddb0' if dark else '#08784f'}")
+        hour_style = f"color: {'#70ddb0' if dark else '#08784f'}"
+        if hour_style != self._hour_style:
+            self._hour_style = hour_style
+            self.hour_label.setStyleSheet(hour_style)
 
 
 class Waveform(QWidget):
@@ -107,7 +153,13 @@ class Waveform(QWidget):
 
     @guarded
     def set_progress(self, progress: float):
-        self.progress = max(0.0, min(1.0, progress))
+        progress = max(0.0, min(1.0, progress))
+        # Position callbacks can arrive several times per second. Ignore moves
+        # smaller than half a screen pixel; painting those frames changes no
+        # visible output and keeps the progress display light on low-end PCs.
+        if abs(progress - self.progress) * max(1, self.width()) < 0.5:
+            return
+        self.progress = progress
         self.update()
 
     def set_style(self, style: str):
@@ -128,6 +180,12 @@ class Waveform(QWidget):
             return
         if channels < 1 or sample_rate < 1:
             return
+        # Audio forwarding is already handled before this optional observer.
+        # Skip even PCM conversion/downmix when a modal dialog covers the panel.
+        application = QApplication.instance()
+        active_modal = getattr(application, "activeModalWidget", None)
+        if callable(active_modal) and active_modal() is not None:
+            return
         samples = array("h")
         samples.frombytes(data[:len(data) // 2 * 2])
         if sys.byteorder != "little":
@@ -135,18 +193,24 @@ class Waveform(QWidget):
         frames = len(samples) // max(1, channels)
         if not frames:
             return
-        frame_samples = []
-        for frame in range(frames):
-            start = frame * channels
-            frame_samples.append(sum(samples[start + channel] for channel in range(channels)) /
-                                 (channels * 32768))
-        self._samples.extend(frame_samples)
-
-        # Keep modal dialogs responsive by avoiding an optional transform
-        # while the visualizer is covered by a modal window.
-        application = QApplication.instance()
-        if application is not None and application.activeModalWidget() is not None:
-            return
+        if channels == 1:
+            # Avoid allocating a temporary Python list for every audio buffer;
+            # buffers arrive frequently while a live visualizer is selected.
+            self._samples.extend(sample / 32768 for sample in samples)
+        elif channels == 2:
+            # Pair the two channel arrays in C and keep only the small generator
+            # loop in Python; this path runs for every live stereo audio buffer.
+            scale = 1.0 / (2 * 32768)
+            self._samples.extend(
+                (left + right) * scale
+                for left, right in zip(samples[::2], samples[1::2]))
+        else:
+            scale = 1.0 / (channels * 32768)
+            for start in range(0, frames * channels, channels):
+                total = 0
+                for channel in range(channels):
+                    total += samples[start + channel]
+                self._samples.append(total * scale)
 
         if self.style == "reactive_wave":
             now = time.monotonic()
@@ -178,9 +242,11 @@ class Waveform(QWidget):
     @guarded
     def _update_spectrum(self, samples: list[float], sample_rate: int):
         size = len(samples)
-        real = [sample * (0.5 - 0.5 * cos(2 * pi * index / (size - 1)))
-                for index, sample in enumerate(samples)]
-        imaginary = [0.0] * size
+        if size < 2 or sample_rate <= 0:
+            return
+        window = _hann_window(size)
+        fft_values = [complex(sample * window[index], 0.0)
+                      for index, sample in enumerate(samples)]
 
         j = 0
         for i in range(1, size):
@@ -190,46 +256,29 @@ class Waveform(QWidget):
                 bit >>= 1
             j ^= bit
             if i < j:
-                real[i], real[j] = real[j], real[i]
-                imaginary[i], imaginary[j] = imaginary[j], imaginary[i]
+                fft_values[i], fft_values[j] = fft_values[j], fft_values[i]
 
         length = 2
         while length <= size:
-            angle = -2 * pi / length
-            step_real, step_imaginary = cos(angle), sin(angle)
+            step = complex(cos(-2 * pi / length), sin(-2 * pi / length))
             half = length // 2
             for start in range(0, size, length):
-                twiddle_real, twiddle_imaginary = 1.0, 0.0
+                twiddle = 1.0 + 0.0j
                 for offset in range(half):
                     even = start + offset
                     odd = even + half
-                    odd_real = (twiddle_real * real[odd]
-                                - twiddle_imaginary * imaginary[odd])
-                    odd_imaginary = (twiddle_real * imaginary[odd]
-                                     + twiddle_imaginary * real[odd])
-                    real[odd] = real[even] - odd_real
-                    imaginary[odd] = imaginary[even] - odd_imaginary
-                    real[even] += odd_real
-                    imaginary[even] += odd_imaginary
-                    twiddle_real, twiddle_imaginary = (
-                        twiddle_real * step_real - twiddle_imaginary * step_imaginary,
-                        twiddle_real * step_imaginary + twiddle_imaginary * step_real)
+                    odd_value = twiddle * fft_values[odd]
+                    even_value = fft_values[even]
+                    fft_values[odd] = even_value - odd_value
+                    fft_values[even] = even_value + odd_value
+                    twiddle *= step
             length *= 2
 
-        nyquist = size // 2
-        min_frequency = 35.0
-        max_frequency = min(16000.0, sample_rate / 2)
         spectrum = []
-        for band in range(len(self.live_spectrum)):
-            low_frequency = min_frequency * (max_frequency / min_frequency) ** (
-                band / len(self.live_spectrum))
-            high_frequency = min_frequency * (max_frequency / min_frequency) ** (
-                (band + 1) / len(self.live_spectrum))
-            low = max(1, floor(low_frequency * size / sample_rate))
-            high = min(nyquist, max(low + 1, floor(high_frequency * size / sample_rate)))
-            magnitudes = [sqrt(real[index] ** 2 + imaginary[index] ** 2) * 2 / size
-                          for index in range(low, high)]
-            magnitude = max(magnitudes, default=0.0)
+        for band, (low, high) in enumerate(_spectrum_bin_ranges(
+                size, sample_rate, len(self.live_spectrum))):
+            magnitude = max((abs(fft_values[index]) for index in range(low, high)),
+                            default=0.0) * 2 / size
             level = max(0.0, min(1.0, (20 * log10(max(magnitude, 1e-5)) + 55) / 55))
             spectrum.append(max(level, self.live_spectrum[band] * 0.78))
         self.live_spectrum = spectrum
@@ -370,12 +419,18 @@ class Waveform(QWidget):
 
 
 class OnAirPanel(QFrame):
+    track_changed = Signal(str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFrameShape(QFrame.StyledPanel)
         self.setMinimumHeight(105)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(9, 4, 9, 4)
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(9, 4, 9, 4)
+        outer.setSpacing(8)
+        content = QWidget(self)
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(1)
         header = QHBoxLayout()
         self.on_air_heading = QLabel("NO AR")
@@ -395,6 +450,9 @@ class OnAirPanel(QFrame):
         times.addWidget(self.elapsed)
         times.addWidget(self.remaining, 1)
         layout.addLayout(times)
+        outer.addWidget(content, 1)
+        self.cover_art = CoverArtLabel(88, self, "da faixa no ar")
+        outer.addWidget(self.cover_art, 0, Qt.AlignVCenter)
         self._process: QProcess | None = None
         # A canceled analysis can still be stopping while the next track starts
         # its own FFmpeg job. Keep every child reachable through shutdown.
@@ -404,6 +462,7 @@ class OnAirPanel(QFrame):
         self._broadcast_active = False
         self._blink_red = False
         self._track_path = ""
+        self._waveform_visualizers_enabled = True
         self._blink_timer = QTimer(self)
         self._blink_timer.setInterval(500)
         self._blink_timer.timeout.connect(self._toggle_on_air_blink)
@@ -437,18 +496,27 @@ class OnAirPanel(QFrame):
     def show_track(self, title: str, path: str):
         self._cancel_analysis()
         self._track_path = str(path)
+        self.cover_art.set_cover_image(None)
+        self.track_changed.emit(self._track_path)
         self.waveform.reset_live()
         self.title.setText(title)
         self.title.setToolTip(title)
         self.waveform.set_levels([])
         self.set_progress(0, 0)
+        if not self._waveform_visualizers_enabled:
+            return
         if self.waveform.style in LIVE_WAVEFORM_STYLES:
             return
-        self._start_waveform_analysis(path)
+        if self.isVisible():
+            self._start_waveform_analysis(path)
 
     @guarded
     def set_waveform_style(self, style: str):
         self.waveform.set_style(style)
+        if not self._waveform_visualizers_enabled:
+            self._cancel_analysis()
+            self.waveform.set_levels([])
+            return
         if style in LIVE_WAVEFORM_STYLES:
             self._cancel_analysis()
             self.waveform.set_levels([])
@@ -456,7 +524,33 @@ class OnAirPanel(QFrame):
             self._start_waveform_analysis(self._track_path)
 
     @guarded
+    def set_waveform_visualizers_enabled(self, enabled: bool):
+        enabled = bool(enabled)
+        if enabled == self._waveform_visualizers_enabled:
+            return
+        self._waveform_visualizers_enabled = enabled
+        if not enabled:
+            self._cancel_analysis()
+            self.waveform.reset_live()
+            self.waveform.set_levels([])
+            self.waveform.hide()
+            return
+        self.waveform.show()
+        if self._track_path and self.waveform.style not in LIVE_WAVEFORM_STYLES:
+            self._start_waveform_analysis(self._track_path)
+
+    @guarded
     def _start_waveform_analysis(self, path: str):
+        # Static analysis decodes the whole track in a child FFmpeg process.
+        # It has no value while the panel is hidden (for example, in the tray).
+        if (not self._waveform_visualizers_enabled or not self.isVisible()
+                or self.waveform.style in LIVE_WAVEFORM_STYLES):
+            return
+        # Switching between static visualization styles does not change the
+        # envelope being decoded. Keep the in-flight job instead of launching
+        # another FFmpeg decode for the same current track.
+        if self._process is not None:
+            return
         try:
             ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
         except (OSError, RuntimeError):
@@ -472,12 +566,15 @@ class OnAirPanel(QFrame):
         self._wave_data = bytearray()
         self._wave_overflow = False
         process.start(ffmpeg, ["-hide_banner", "-loglevel", "error", "-i", str(Path(path)),
-                               "-vn", "-ac", "1", "-ar", "2000", "-f", "s16le", "-"])
+                               "-vn", "-threads", "1", "-ac", "1", "-ar", "200",
+                               "-f", "s16le", "-"])
 
     @guarded
     def clear_track(self):
         self._cancel_analysis()
         self._track_path = ""
+        self.cover_art.set_cover_image(None)
+        self.track_changed.emit("")
         self.waveform.reset_live()
         self.title.setText("Nenhuma faixa em reprodução")
         self.title.setToolTip("")
@@ -504,18 +601,42 @@ class OnAirPanel(QFrame):
 
     @guarded
     def set_progress(self, position_ms: int, duration_ms: int):
-        self.elapsed.setText(minutes_seconds(position_ms))
-        self.remaining.setText("−" + minutes_seconds(max(0, duration_ms - position_ms)))
-        self.waveform.set_progress(position_ms / duration_ms if duration_ms > 0 else 0)
+        elapsed = minutes_seconds(position_ms)
+        remaining = "−" + minutes_seconds(max(0, duration_ms - position_ms))
+        if self.elapsed.text() != elapsed:
+            self.elapsed.setText(elapsed)
+        if self.remaining.text() != remaining:
+            self.remaining.setText(remaining)
+        if self._waveform_visualizers_enabled:
+            self.waveform.set_progress(position_ms / duration_ms if duration_ms > 0 else 0)
 
     @guarded
     def feed_audio_buffer(self, buffer):
+        if not self._waveform_visualizers_enabled:
+            return
         fmt = buffer.format()
         data = buffer.data()
-        if data is not None:
-            raw_data = bytes(data)
-            if raw_data:
-                self.waveform.feed_audio_buffer(raw_data, fmt.channelCount(), fmt.sampleRate())
+        if data is not None and len(data):
+            # QAudioBuffer exposes a read-only memoryview; let the visualizer
+            # consume it directly instead of copying the same PCM block first.
+            self.waveform.feed_audio_buffer(data, fmt.channelCount(), fmt.sampleRate())
+
+    @guarded
+    def showEvent(self, event):
+        super().showEvent(event)
+        if (self._waveform_visualizers_enabled and self._track_path
+                and not self.waveform.levels and self._process is None
+                and self.waveform.style not in LIVE_WAVEFORM_STYLES):
+            path = self._track_path
+            QTimer.singleShot(
+                0, lambda target=path: self._start_waveform_analysis(target)
+                if self.isVisible() and target == self._track_path else None)
+
+    @guarded
+    def hideEvent(self, event):
+        if self._process is not None:
+            self._cancel_analysis()
+        super().hideEvent(event)
 
     def _cancel_analysis(self):
         process = self._process
@@ -583,3 +704,60 @@ class OnAirPanel(QFrame):
         peak = max(levels) or 1
         self.waveform.set_levels([max(0.05, min(1.0, (value / peak) ** 0.8))
                                   for value in levels])
+
+
+class CoverArtLabel(QLabel):
+    """Square cover preview that preserves the source image aspect ratio."""
+
+    cover_clicked = Signal(object)
+
+    def __init__(self, size: int = 104, parent=None, description: str = "do álbum"):
+        super().__init__(parent)
+        self._description = description
+        self.setFixedSize(size, size)
+        self.setAlignment(Qt.AlignCenter)
+        self.setFrameShape(QFrame.StyledPanel)
+        self.setStyleSheet(
+            "QLabel { background: palette(base); color: palette(mid); "
+            "border: 1px solid palette(mid); border-radius: 3px; }"
+        )
+        self._image = None
+        self.setText("♪\nSem capa")
+        self.setCursor(Qt.ArrowCursor)
+        self.setToolTip("Nenhuma capa disponível")
+
+    def set_cover_image(self, image):
+        self._image = image if image is not None and not image.isNull() else None
+        if self._image is None:
+            self.setCursor(Qt.ArrowCursor)
+            self.setToolTip("Nenhuma capa disponível")
+        else:
+            self.setCursor(Qt.PointingHandCursor)
+            self.setToolTip(f"Clique para visualizar a capa {self._description}")
+        self._update_pixmap()
+
+    def mouseReleaseEvent(self, event):
+        if (event.button() == Qt.LeftButton and self.rect().contains(event.position().toPoint())
+                and self._image is not None):
+            self.cover_clicked.emit(self._image.copy())
+        super().mouseReleaseEvent(event)
+
+    def _update_pixmap(self):
+        if self._image is None:
+            self.setPixmap(QPixmap())
+            self.setText("♪\nSem capa")
+            return
+        rect = self.contentsRect()
+        width, height = rect.width(), rect.height()
+        if width <= 0 or height <= 0:
+            return
+        scaled = QPixmap.fromImage(self._image).scaled(
+            width, height, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+        x = max(0, (scaled.width() - width) // 2)
+        y = max(0, (scaled.height() - height) // 2)
+        self.setText("")
+        self.setPixmap(scaled.copy(x, y, width, height))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_pixmap()

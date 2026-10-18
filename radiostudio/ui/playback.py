@@ -10,6 +10,7 @@ from ..services.transition_analysis import (
 )
 
 _logger = logging.getLogger("radiostudio")
+MAX_TRANSITION_ANALYSES = 256
 
 
 class PlaybackMixin:
@@ -88,6 +89,7 @@ class PlaybackMixin:
         source_id = ("main" if player is self.player else
                      "mix" if player is self.mix_player else None)
         if source_id == "main":
+            self._main_source_generation = getattr(self, "_main_source_generation", 0) + 1
             self.broadcast.clear_source(source_id, preserve_primed=True)
         elif source_id:
             self.broadcast.remove_source(source_id)
@@ -380,6 +382,9 @@ class PlaybackMixin:
 
     @guarded
     def handle_invalid_main_media(self, path, fallback_error=""):
+        if (self.is_quitting or self.stop_pending
+                or getattr(self, "_suppress_end_recovery", False)):
+            return
         self.fade_in_pending_ms = 0
         self.gain_ramps.pop("main", None)
         if not self.gain_ramps:
@@ -397,7 +402,21 @@ class PlaybackMixin:
         self.last_playback["was_playing"] = False
         if not self.is_quitting:
             self.save_state()
-            QTimer.singleShot(0, self.next_track)
+            source_generation = getattr(self, "_main_source_generation", 0)
+            QTimer.singleShot(
+                0, lambda source=path, generation=source_generation:
+                self.skip_invalid_track_if_current(source, generation))
+
+    @guarded
+    def skip_invalid_track_if_current(self, path, source_generation):
+        """Ignore a deferred error skip if playback changed before it ran."""
+        if (self.is_quitting or self.stop_pending
+                or getattr(self, "_suppress_end_recovery", False)
+                or source_generation != getattr(self, "_main_source_generation", 0)
+                or not same_audio_path(self.original_media_path(self.player), path)
+                or self.player.mediaStatus() != QMediaPlayer.InvalidMedia):
+            return
+        self.next_track()
 
     @guarded
     def advance_after_fade(self, next_index):
@@ -522,6 +541,8 @@ class PlaybackMixin:
     @guarded
     def transition_analysis_ready(self, path, analysis):
         self.transition_analyses[path] = analysis
+        if len(self.transition_analyses) > MAX_TRANSITION_ANALYSES:
+            self.transition_analyses.pop(next(iter(self.transition_analyses)))
         if (self.auto_transitions_enabled and not self.is_quitting
                 and self.player.playbackState() == QMediaPlayer.PlayingState):
             self.maybe_start_mix()
@@ -618,6 +639,11 @@ class PlaybackMixin:
                 return
             transition_ms = self.mix_ms
             cue_ms = 0
+        # Position updates arrive repeatedly during playback. The requested
+        # overlap is an upper bound, so there is no reason to stat/read the
+        # next file's tags until the current track is inside that window.
+        if remaining > transition_ms:
+            return
         next_duration = read_track_metadata(next_path).duration
         transition_ms = bounded_transition_duration_ms(
             transition_ms, duration, remaining, round(next_duration * 1000))
@@ -925,8 +951,10 @@ class PlaybackMixin:
         self.position.setRange(0, duration)
         if not self.position.isSliderDown():
             self.position.setValue(position)
-        self.position_label.setText(
-            f"{clock_text(position)} / {clock_text(duration)}")
+        display = f"{clock_text(position)} / {clock_text(duration)}"
+        current_text = getattr(self.position_label, "text", None)
+        if not callable(current_text) or current_text() != display:
+            self.position_label.setText(display)
         self.on_air.set_progress(position, duration)
 
     @guarded

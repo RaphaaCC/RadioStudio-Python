@@ -8,12 +8,12 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QRunnable, Qt, Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGridLayout,
+    QApplication, QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGridLayout,
     QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMessageBox, QPushButton, QSpinBox, QTabWidget, QTableWidget,
     QTableWidgetItem, QTimeEdit, QVBoxLayout, QWidget,
 )
-from PySide6.QtCore import QTime, QThreadPool
+from PySide6.QtCore import QTime, QThreadPool, QTimer
 
 from ..services.autodj import DAY_NAMES, FILTER_FIELDS, active_program
 from ..runtime_safety import guarded
@@ -198,6 +198,10 @@ class AutoDJPanel(QWidget):
         self.workers = set()
         self.scanning_libraries = set()
         self.pool = QThreadPool.globalInstance()
+        self.history_tab_index = None
+        self._history_refresh_timer = QTimer(self)
+        self._history_refresh_timer.setSingleShot(True)
+        self._history_refresh_timer.timeout.connect(self.refresh_history_incrementally)
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
 
@@ -243,6 +247,7 @@ class AutoDJPanel(QWidget):
         self._build_libraries_tab()
         self._build_program_tab()
         self._build_history_tab()
+        self.tabs.currentChanged.connect(self._tab_changed)
         self.load_settings(main_window.autodj_config)
         self.refresh_libraries()
         self.refresh_programs()
@@ -300,7 +305,28 @@ class AutoDJPanel(QWidget):
         for column, width in enumerate((145, 165, 130, 130, 100, 60)):
             self.history_table.setColumnWidth(column, width)
         layout.addWidget(self.history_table)
-        self.tabs.addTab(page, "🕘 Histórico")
+        self.history_tab_index = self.tabs.addTab(page, "🕘 Histórico")
+
+    @guarded
+    def _tab_changed(self, index):
+        if index == self.history_tab_index:
+            self.refresh_history(incremental=self.history_table.rowCount() > 0)
+
+    @guarded
+    def schedule_history_refresh(self):
+        # Keep QTableWidget work out of the reentrant media-state callback.
+        if self.tabs.currentIndex() == self.history_tab_index and self.isVisible():
+            self._history_refresh_timer.start(0)
+
+    @guarded
+    def refresh_history_incrementally(self):
+        self.refresh_history(incremental=True)
+
+    @guarded
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self.tabs.currentIndex() == self.history_tab_index:
+            self.refresh_history(incremental=self.history_table.rowCount() > 0)
 
     @guarded
     def load_settings(self, config):
@@ -339,7 +365,9 @@ class AutoDJPanel(QWidget):
         self._set_toggle_label(enabled)
 
     def set_status(self, text):
-        self.status.setText(text)
+        text = str(text)
+        if self.status.text() != text:
+            self.status.setText(text)
 
     @guarded
     def refresh_libraries(self):
@@ -405,7 +433,9 @@ class AutoDJPanel(QWidget):
         self.scanning_libraries.add(library_id)
         worker.signals.finished.connect(self._scan_finished)
         self.set_status("Indexando biblioteca em segundo plano…")
-        self.pool.start(worker)
+        # Library scans can parse many tags; keep them below interactive work
+        # so the queue and playback controls stay responsive on busy PCs.
+        self.pool.start(worker, priority=-1)
 
     @guarded
     def _scan_finished(self, library_id, result):
@@ -525,10 +555,33 @@ class AutoDJPanel(QWidget):
             self.main_window.fill_autodj_queue(bypass_throttle=True)
 
     @guarded
-    def refresh_history(self):
-        rows = self.library.recent_history(1000)
-        self.history_table.setRowCount(len(rows))
-        for row, entry in enumerate(rows):
+    def refresh_history(self, incremental=False):
+        # Track starts are recorded from playback callbacks. Rebuilding up to
+        # 1,000 rows (7,000 table items) while the history tab is hidden can
+        # stall the UI at every song change, so refresh lazily on demand. A
+        # modal dialog can cover a visible AutoDJ panel; defer table work until
+        # the dialog closes rather than doing it behind the dialog.
+        if self.tabs.currentIndex() != self.history_tab_index or not self.isVisible():
+            return
+        application = QApplication.instance()
+        active_modal = getattr(application, "activeModalWidget", None)
+        if callable(active_modal) and active_modal() is not None:
+            self._history_refresh_timer.start(1000)
+            return
+        self._history_refresh_timer.stop()
+        latest_id = None
+        if incremental and self.history_table.rowCount():
+            first_item = self.history_table.item(0, 0)
+            try:
+                latest_id = int(first_item.data(Qt.UserRole + 1)) if first_item else None
+            except (TypeError, ValueError, OverflowError):
+                latest_id = None
+        if latest_id is not None and hasattr(self.library, "history_after_id"):
+            rows = self.library.history_after_id(latest_id, 1000)
+        else:
+            rows = self.library.recent_history(1000)
+
+        def set_entry(row, entry):
             try:
                 when = datetime.fromtimestamp(float(entry["played_at"])).astimezone().strftime(
                     "%d/%m/%Y %H:%M:%S")
@@ -540,7 +593,38 @@ class AutoDJPanel(QWidget):
                 item = QTableWidgetItem(str(value or ""))
                 if column == 0:
                     item.setData(Qt.UserRole, entry["played_at"])
+                    if "id" in entry:
+                        item.setData(Qt.UserRole + 1, entry["id"])
                 self.history_table.setItem(row, column, item)
+
+        if incremental and latest_id is not None and self.history_table.rowCount():
+            if not rows:
+                return
+            first_item = self.history_table.item(0, 0)
+            try:
+                new_rows = [entry for entry in rows if int(entry["id"]) > latest_id]
+                latest_played_at = float(first_item.data(Qt.UserRole))
+                if any(float(entry["played_at"]) < latest_played_at
+                       for entry in new_rows):
+                    # Keep the full refresh as the fallback for imported or
+                    # corrected history whose timestamp is older than the top row.
+                    new_rows = None
+            except (KeyError, TypeError, ValueError, OverflowError):
+                new_rows = None
+            if new_rows is not None:
+                for entry in reversed(new_rows):
+                    self.history_table.insertRow(0)
+                    set_entry(0, entry)
+                    if self.history_table.rowCount() > 1000:
+                        self.history_table.removeRow(self.history_table.rowCount() - 1)
+                return
+            # An imported or corrected timestamp can place a newer ID below
+            # existing rows. Re-fetch the full display window before rebuilding.
+            rows = self.library.recent_history(1000)
+
+        self.history_table.setRowCount(len(rows))
+        for row, entry in enumerate(rows):
+            set_entry(row, entry)
 
     @guarded
     def clear_history(self):

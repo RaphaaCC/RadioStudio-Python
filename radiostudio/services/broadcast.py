@@ -29,6 +29,7 @@ SAMPLE_RATE = 44100
 CHANNELS = 2
 FRAME_MS = 20
 PCM_BYTES_PER_FRAME = SAMPLE_RATE * CHANNELS * 2 * FRAME_MS // 1000
+SILENCE_PCM_FRAME = bytes(PCM_BYTES_PER_FRAME)
 ENCODED_CHUNK_BYTES = 1024
 ENCODED_QUEUE_MAX_MS = 2000
 OUTPUT_RECONNECT_DELAY = 2.0
@@ -111,7 +112,7 @@ class PCMBuffer:
         self.dropped_bytes = 0
         self.high_watermark_bytes = 0
 
-    def append(self, data: bytes):
+    def append(self, data: bytes, gain: float | None = None):
         if not data:
             return
         data = bytes(data)
@@ -125,17 +126,17 @@ class PCMBuffer:
             if len(data) > self.capacity_bytes:
                 self.dropped_bytes += len(data) - self.capacity_bytes
                 data = data[-self.capacity_bytes:]
-            self.chunks.append(data)
+            self.chunks.append((data, gain))
             self.length += len(data)
             while self.length > self.capacity_bytes and self.chunks:
                 excess = self.length - self.capacity_bytes
-                oldest = self.chunks[0]
+                oldest, oldest_gain = self.chunks[0]
                 if len(oldest) <= excess:
                     self.chunks.popleft()
                     self.length -= len(oldest)
                     self.dropped_bytes += len(oldest)
                 else:
-                    self.chunks[0] = oldest[excess:]
+                    self.chunks[0] = (oldest[excess:], oldest_gain)
                     self.length -= excess
                     self.dropped_bytes += excess
             self.high_watermark_bytes = max(self.high_watermark_bytes, self.length)
@@ -148,31 +149,55 @@ class PCMBuffer:
             if not preserve_primed:
                 self.primed = False
 
-    def take(self, length: int) -> bytes:
+    def take_if_empty(self, length: int):
+        """Return shared silence for an empty frame without allocating a buffer."""
         length = max(0, int(length))
         if not length:
             return b""
-        result = bytearray()
+        with self.lock:
+            if self.length:
+                return None
+            if not self.primed and self.length < self.min_prebuffer_bytes:
+                self.warmup_silence_frames += 1
+            else:
+                self.primed = True
+                self.zero_filled_bytes += length
+                self.underflow_frames += 1
+        return SILENCE_PCM_FRAME if length == PCM_BYTES_PER_FRAME else bytes(length)
+
+    def take_gained(self, length: int) -> list[tuple[bytes, float | None]]:
+        """Read PCM while preserving the gain captured for each queued block."""
+        length = max(0, int(length))
+        if not length:
+            return []
+        result = []
+        collected = 0
         with self.lock:
             if not self.primed and self.length < self.min_prebuffer_bytes:
                 self.warmup_silence_frames += 1
-                return b"\0" * length
+                return [(b"\0" * length, None)]
             self.primed = True
-            while self.chunks and len(result) < length:
-                chunk = self.chunks.popleft()
-                needed = length - len(result)
-                result.extend(chunk[:needed])
-                self.length -= min(len(chunk), needed)
+            while self.chunks and collected < length:
+                chunk, gain = self.chunks.popleft()
+                needed = length - collected
+                count = min(len(chunk), needed)
+                result.append((chunk[:count], gain))
+                collected += count
+                self.length -= count
                 if len(chunk) > needed:
                     remainder = chunk[needed:]
-                    self.chunks.appendleft(remainder)
+                    self.chunks.appendleft((remainder, gain))
                     break
-            if len(result) < length:
-                missing = length - len(result)
+            if collected < length:
+                missing = length - collected
                 self.zero_filled_bytes += missing
                 self.underflow_frames += 1
-                result.extend(b"\0" * missing)
-        return bytes(result)
+                result.append((b"\0" * missing, None))
+        return result
+
+    def take(self, length: int) -> bytes:
+        """Compatibility read for callers that do not need per-block gains."""
+        return b"".join(data for data, _gain in self.take_gained(length))
 
     def diagnostics_snapshot(self):
         with self.lock:
@@ -190,13 +215,18 @@ class PCMBuffer:
 
 class LocalStreamServer:
     def __init__(self, host: str, port: int, max_listeners: int, station: str,
-                 genre: str = "", url: str = "", description: str = ""):
+                 genre: str = "", url: str = "", description: str = "",
+                 send_cover_art: bool = False):
         self.host, self.port = host, port
         self.max_listeners = max_listeners
         self.station = station
         self.genre = genre
         self.url = url
         self.description = description
+        self.send_cover_art = bool(send_cover_art)
+        self.cover_art_data: bytes | None = None
+        self.cover_art_mime_type = ""
+        self.cover_lock = threading.Lock()
         self.diagnostics_provider = None
         self.title = ""
         self.tls = False
@@ -224,7 +254,8 @@ class LocalStreamServer:
                 pass
 
             def do_GET(self):
-                if self.path == "/status.json":
+                route = self.path.partition("?")[0]
+                if route == "/status.json":
                     diagnostics = {}
                     if callable(owner.diagnostics_provider):
                         try:
@@ -232,10 +263,16 @@ class LocalStreamServer:
                         except Exception:
                             logging.getLogger("radiostudio").exception(
                                 "Falha ao coletar diagnóstico da transmissão")
+                    with owner.cover_lock:
+                        cover_available = bool(
+                            owner.send_cover_art and owner.cover_art_data)
+                        cover_mime_type = owner.cover_art_mime_type if cover_available else ""
                     body = json.dumps({"station": owner.station, "genre": owner.genre,
                                        "url": owner.url, "description": owner.description,
                                        "title": owner.title,
                                        "listeners": owner.listeners,
+                                       "cover_url": "/cover" if cover_available else None,
+                                       "cover_mime_type": cover_mime_type,
                                        "audio_diagnostics": diagnostics},
                                       ensure_ascii=False).encode("utf-8")
                     self.send_response(200)
@@ -244,7 +281,21 @@ class LocalStreamServer:
                     self.end_headers()
                     self.wfile.write(body)
                     return
-                if self.path not in ("/", "/live.mp3"):
+                if route == "/cover":
+                    with owner.cover_lock:
+                        cover_data = owner.cover_art_data if owner.send_cover_art else None
+                        cover_mime_type = owner.cover_art_mime_type
+                    if not cover_data:
+                        self.send_error(404)
+                        return
+                    self.send_response(200)
+                    self.send_header("Content-Type", cover_mime_type or "application/octet-stream")
+                    self.send_header("Content-Length", str(len(cover_data)))
+                    self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+                    self.end_headers()
+                    self.wfile.write(cover_data)
+                    return
+                if route not in ("/", "/live.mp3"):
                     self.send_error(404)
                     return
                 client = queue.Queue(maxsize=80)
@@ -323,6 +374,21 @@ class LocalStreamServer:
                 server.server_close()
             raise
         self.thread = thread
+
+    def set_cover_art(self, data: bytes | None, mime_type: str = ""):
+        """Atomically replace or clear the optional cover exposed to listeners."""
+        with self.cover_lock:
+            safe_data = bytes(data) if self.send_cover_art and data else None
+            safe_mime_type = str(mime_type or "") if safe_data else ""
+            self.cover_art_data = safe_data
+            self.cover_art_mime_type = safe_mime_type
+
+    def set_cover_art_enabled(self, enabled: bool):
+        with self.cover_lock:
+            self.send_cover_art = bool(enabled)
+            if not self.send_cover_art:
+                self.cover_art_data = None
+                self.cover_art_mime_type = ""
 
     def publish(self, data: bytes):
         with self.lock:
@@ -764,6 +830,8 @@ class BroadcastManager:
         self.mixer_thread = None
         self.stop_event = threading.Event()
         self.title = ""
+        self.cover_art_data: bytes | None = None
+        self.cover_art_mime_type = ""
         self.profiles = []
         self.startup_errors: dict[str, str] = {}
 
@@ -779,7 +847,7 @@ class BroadcastManager:
                 self.sources[source] = (PCMBuffer(), gain)
             buffer, _ = self.sources[source]
             self.sources[source] = (buffer, gain)
-        buffer.append(data)
+        buffer.append(data, gain)
 
     def remove_source(self, source: str):
         with self.sources_lock:
@@ -828,7 +896,9 @@ class BroadcastManager:
                                               int(local.get("max_listeners", 10)),
                                               local.get("station", "RadioStudio Python"),
                                               local.get("genre", ""), local.get("url", ""),
-                                              local.get("description", ""))
+                                              local.get("description", ""),
+                                              send_cover_art=bool(local.get("send_cover_art", False)))
+            local_server.set_cover_art(self.cover_art_data, self.cover_art_mime_type)
             local_server.diagnostics_provider = getattr(self, "diagnostics_snapshot", None)
             targets.append(EncoderOutput(
                 "Servidor embutido", int(local.get("bitrate", 192)), local_server,
@@ -894,7 +964,8 @@ class BroadcastManager:
         deadline = time.monotonic()
         while not self.stop_event.is_set():
             mixed = self._mix_source_samples()
-            pcm = array("h", (max(-32768, min(32767, value)) for value in mixed)).tobytes()
+            pcm = (SILENCE_PCM_FRAME if mixed is None else
+                   array("h", (max(-32768, min(32767, value)) for value in mixed)).tobytes())
             self._feed_outputs(pcm)
             deadline += FRAME_MS / 1000
             self.stop_event.wait(max(0, deadline - time.monotonic()))
@@ -902,18 +973,44 @@ class BroadcastManager:
                 deadline = time.monotonic()
 
     def _mix_source_samples(self):
-        """Read each source independently so one broken component is isolated."""
+        """Mix active sources; return None when the full frame is silence."""
         with self.sources_lock:
             sources = list(self.sources.items())
-        mixed = [0] * (PCM_BYTES_PER_FRAME // 2)
+        mixed = None
         for source_name, (buffer, gain) in sources:
-            samples = array("h")
             try:
-                samples.frombytes(buffer.take(PCM_BYTES_PER_FRAME))
-                if len(samples) != len(mixed):
-                    raise ValueError("A fonte retornou um quadro PCM com tamanho inválido")
-                for index, sample in enumerate(samples):
-                    mixed[index] += int(sample * gain)
+                take_if_empty = getattr(buffer, "take_if_empty", None)
+                if (callable(take_if_empty)
+                        and take_if_empty(PCM_BYTES_PER_FRAME) is not None):
+                    continue
+                # Keep third-party/test buffers compatible with the original
+                # take() interface; their behavior remains isolated below.
+                take_gained = getattr(buffer, "take_gained", None)
+                if callable(take_gained):
+                    segments = take_gained(PCM_BYTES_PER_FRAME)
+                    sample_offset = 0
+                    if mixed is None:
+                        mixed = [0] * (PCM_BYTES_PER_FRAME // 2)
+                    for data, captured_gain in segments:
+                        samples = array("h")
+                        samples.frombytes(data)
+                        segment_gain = gain if captured_gain is None else captured_gain
+                        for sample in samples:
+                            if sample_offset >= len(mixed):
+                                raise ValueError("A fonte retornou um quadro PCM grande demais")
+                            mixed[sample_offset] += int(sample * segment_gain)
+                            sample_offset += 1
+                    if sample_offset != len(mixed):
+                        raise ValueError("A fonte retornou um quadro PCM com tamanho inválido")
+                else:
+                    samples = array("h")
+                    samples.frombytes(buffer.take(PCM_BYTES_PER_FRAME))
+                    if len(samples) != PCM_BYTES_PER_FRAME // 2:
+                        raise ValueError("A fonte retornou um quadro PCM com tamanho inválido")
+                    if mixed is None:
+                        mixed = [0] * (PCM_BYTES_PER_FRAME // 2)
+                    for index, sample in enumerate(samples):
+                        mixed[index] += int(sample * gain)
             except Exception:
                 with self.sources_lock:
                     current = self.sources.get(source_name)
@@ -982,6 +1079,19 @@ class BroadcastManager:
             except Exception:
                 logging.getLogger("radiostudio").exception(
                     "Falha ao preparar atualização de metadados para %s", profile.get("name", "perfil"))
+
+    def set_cover_art(self, data: bytes | None, mime_type: str = ""):
+        self.cover_art_data = bytes(data) if data else None
+        self.cover_art_mime_type = str(mime_type or "") if data else ""
+        if self.local_server:
+            self.local_server.set_cover_art(self.cover_art_data, self.cover_art_mime_type)
+
+    def set_cover_art_enabled(self, enabled: bool):
+        if self.local_server:
+            self.local_server.set_cover_art_enabled(enabled)
+            if enabled:
+                self.local_server.set_cover_art(
+                    self.cover_art_data, self.cover_art_mime_type)
 
     @staticmethod
     def _send_metadata(profile: dict, title: str):

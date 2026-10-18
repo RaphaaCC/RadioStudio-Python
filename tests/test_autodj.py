@@ -91,6 +91,18 @@ class AutoDJTests(unittest.TestCase):
             store.remove_library(library_id)
             self.assertEqual(store.recent_history()[0]["title"], "Song One")
 
+    def test_history_after_id_only_returns_newer_play_ids(self):
+        with tempfile.TemporaryDirectory() as folder:
+            store = MusicLibrary(Path(folder) / "library.sqlite3")
+            with store._connect() as db:
+                db.executemany(
+                    "INSERT INTO play_history(played_at, path, title) VALUES(?, ?, ?)",
+                    [(100, "old.mp3", "Old"), (200, "new.mp3", "New")])
+            all_rows = store.recent_history()
+            new_rows = store.history_after_id(all_rows[-1]["id"], 1000)
+
+        self.assertEqual([row["title"] for row in new_rows], ["New"])
+
     def test_existing_library_database_is_migrated_without_losing_rows(self):
         with tempfile.TemporaryDirectory() as folder:
             database = Path(folder) / "library.sqlite3"

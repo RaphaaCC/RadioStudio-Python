@@ -155,8 +155,16 @@ def choose_track(tracks, history, *, artist_cooldown_minutes=0,
     except (TypeError, ValueError, OverflowError):
         now = time.time()
     excluded = {audio_path_key(path) for path in excluded_paths}
-    candidates = [track for track in tracks if isinstance(track, dict)
-                  if audio_path_key(track.get("path", "")) not in excluded]
+    candidates = []
+    for track in tracks:
+        if not isinstance(track, dict):
+            continue
+        path_key = audio_path_key(track.get("path", ""))
+        if path_key not in excluded:
+            # Path normalization and artist fallback were repeated in every
+            # cooldown stage and again during sorting. Cache them for this pick;
+            # large libraries can contain tens of thousands of indexed rows.
+            candidates.append((track, path_key, _artist_key(track)))
     if not candidates and excluded:
         # A tiny library may have fewer tracks than the queue target. Repeats in a
         # queue are still avoided; the caller can try again after playback advances.
@@ -174,12 +182,12 @@ def choose_track(tracks, history, *, artist_cooldown_minutes=0,
     track_window = cooldown(track_cooldown_minutes)
     artist_window = cooldown(artist_cooldown_minutes)
 
-    def recent(track, window):
-        played = last_paths.get(audio_path_key(track.get("path", "")))
+    def recent(candidate, window):
+        played = last_paths.get(candidate[1])
         return bool(window and played is not None and played > 0 and now - played < window)
 
-    def artist_recent(track):
-        artist = _artist_key(track)
+    def artist_recent(candidate):
+        artist = candidate[2]
         played = last_artists.get(artist) if artist else None
         return bool(artist_window and played is not None and played > 0
                     and now - played < artist_window)
@@ -192,9 +200,9 @@ def choose_track(tracks, history, *, artist_cooldown_minutes=0,
     ]
     eligible, reason = [], ""
     for relax_artist, relax_track, note in stages:
-        eligible = [track for track in candidates
-                    if (relax_artist or not artist_recent(track))
-                    and (relax_track or not recent(track, track_window))]
+        eligible = [candidate for candidate in candidates
+                    if (relax_artist or not artist_recent(candidate))
+                    and (relax_track or not recent(candidate, track_window))]
         if eligible:
             reason = note
             break
@@ -203,20 +211,19 @@ def choose_track(tracks, history, *, artist_cooldown_minutes=0,
 
     # Rotate toward tracks least recently heard, with random choice among the oldest
     # portion so shuffled libraries remain lively and deterministic ties do not form.
-    def last_played(track):
-        return last_paths.get(audio_path_key(track.get("path", "")), 0)
-    eligible.sort(key=last_played)
+    eligible.sort(key=lambda candidate: last_paths.get(candidate[1], 0))
     if len(eligible) > 1:
         pool_size = max(1, min(len(eligible), math.ceil(len(eligible) * 0.2)))
         pool = eligible[:pool_size]
     else:
         pool = eligible
     while pool:
-        chosen = random.choice(pool)
+        selected = random.choice(pool)
+        chosen = selected[0]
         if Path(str(chosen.get("path", ""))).is_file():
             return chosen, reason
-        pool.remove(chosen)
-        eligible.remove(chosen)
+        pool.remove(selected)
+        eligible.remove(selected)
         if not pool and eligible:
             pool_size = max(1, min(len(eligible), math.ceil(len(eligible) * 0.2)))
             pool = eligible[:pool_size]

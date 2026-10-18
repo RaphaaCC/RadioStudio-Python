@@ -59,7 +59,7 @@ class ProfileDialog(QDialog):
         self.kind.addItem("SHOUTcast (fonte v1/v2 compatível)", "shoutcast")
         self.kind.setCurrentIndex(0 if self.profile["kind"] == "icecast" else 1)
         identity_grid.addWidget(self.kind, 0, 3)
-        self.enabled = QCheckBox("Ativo ao iniciar transmissão")
+        self.enabled = QCheckBox("Ativo?")
         self.enabled.setChecked(self.profile.get("enabled", True))
         identity_grid.addWidget(self.enabled, 1, 1, 1, 3)
         layout.addWidget(identity)
@@ -269,6 +269,20 @@ class BroadcastPanel(QWidget):
         grid.addWidget(self.local_encoder_quality, 3, 1, 1, 3)
         self.local_url = QLabel("Endereço: http://127.0.0.1:8090/live.mp3")
         grid.addWidget(self.local_url, 4, 0, 1, 4)
+        self.local_send_cover = QCheckBox("Disponibilizar capa junto aos metadados do servidor embutido")
+        self.local_send_cover.setToolTip(
+            "A capa atual fica disponível em /cover e o endereço aparece em /status.json. "
+            "Icecast recebe título em texto. Arte no SHOUTcast DNAS v2 exige configuração "
+            "de arquivo diretamente no servidor e não é enviada pelo RadioStudio.")
+        grid.addWidget(self.local_send_cover, 5, 0, 1, 4)
+        cover_note = QLabel(
+            "A capa é exposta somente pelo servidor embutido (/cover e /status.json). "
+            "Icecast recebe título em texto; arte no SHOUTcast DNAS v2 depende de "
+            "configuração própria do servidor, não de envio pelo RadioStudio.")
+        cover_note.setWordWrap(True)
+        cover_note.setStyleSheet("color: palette(mid); font-size: 9pt;")
+        grid.addWidget(cover_note, 6, 0, 1, 4)
+        self.local_send_cover.toggled.connect(self.update_cover_delivery_setting)
         self.local_port.valueChanged.connect(self.update_url)
         self.lan.toggled.connect(self.update_url)
         layout.addWidget(local_group)
@@ -317,11 +331,16 @@ class BroadcastPanel(QWidget):
         scheme = "https" if tls else "http"
         self.local_url.setText(f"Endereço: {scheme}://{host}:{self.local_port.value()}/live.mp3")
 
+    @guarded
+    def update_cover_delivery_setting(self, enabled: bool):
+        self.main_window.broadcast.set_cover_art_enabled(enabled)
+
     def local_config(self):
         return {"enabled": self.local_enabled.isChecked(), "lan": self.lan.isChecked(),
                 "port": self.local_port.value(), "max_listeners": self.max_listeners.value(),
                 "bitrate": self.local_bitrate.value(),
                 "encoder_quality": int(self.local_encoder_quality.currentData()),
+                "send_cover_art": self.local_send_cover.isChecked(),
                 "station": self.local_station.text().strip()}
 
     def load_config(self, profiles, local):
@@ -358,6 +377,7 @@ class BroadcastPanel(QWidget):
         self.local_encoder_quality.setCurrentIndex(quality_index if quality_index >= 0 else 1)
         self.local_station.setText("" if local.get("station") == "RadioStudio Python"
                                    else str(local.get("station") or ""))
+        self.local_send_cover.setChecked(bool(local.get("send_cover_art", False)))
         for profile in self.profiles:
             if profile.get("station") == "RadioStudio Python":
                 profile["station"] = ""
@@ -513,11 +533,17 @@ class BroadcastPanel(QWidget):
                     break
             else:
                 status = self.main_window.broadcast.startup_errors.get(profile["id"], "Parado")
-            self.table.item(i, 4).setText(status)
-            self.table.item(i, 5).setText(listener_count)
+            status_item = self.table.item(i, 4)
+            if status_item is not None and status_item.text() != status:
+                status_item.setText(status)
+            listeners_item = self.table.item(i, 5)
+            if listeners_item is not None and listeners_item.text() != listener_count:
+                listeners_item.setText(listener_count)
         if outputs:
             active = sum(output.status == "Ativo" for output in outputs)
             listeners = self.main_window.broadcast.local_server.listeners if self.main_window.broadcast.local_server else 0
-            self.summary.setText(f"{active}/{len(outputs)} saídas ativas · {listeners} ouvinte(s) locais")
+            summary = f"{active}/{len(outputs)} saídas ativas · {listeners} ouvinte(s) locais"
         else:
-            self.summary.setText("Transmissão desligada")
+            summary = "Transmissão desligada"
+        if self.summary.text() != summary:
+            self.summary.setText(summary)

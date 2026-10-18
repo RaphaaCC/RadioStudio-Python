@@ -11,12 +11,40 @@ from ..services.autodj import (
 )
 
 
+def _cooldown_seconds(value):
+    try:
+        return max(0, int(value)) * 60
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
 class AutoDJControllerMixin:
+    def _autodj_selection(self):
+        libraries = self.music_library.libraries()
+        enabled_ids = [lib["id"] for lib in libraries if lib.get("enabled")]
+        program = active_program(self.autodj_programs)
+        requested_ids = program.get("library_ids", []) if program else []
+        if not isinstance(requested_ids, (list, tuple, set)):
+            requested_ids = []
+        requested_ids = list(requested_ids)
+        selected_ids = [value for value in requested_ids if value in enabled_ids]
+        if not requested_ids:
+            selected_ids = enabled_ids
+        return program, selected_ids, bool(requested_ids)
+
+    def current_autodj_signature(self):
+        program, selected_ids, _has_requested_libraries = self._autodj_selection()
+        return program_signature(program), tuple(sorted(selected_ids, key=str))
+
     @guarded
     def start_autodj_if_needed(self):
         if not self.autodj_config.get("enabled"):
+            self.autodj_startup_pending = False
             return
-        self.fill_autodj_queue(force=True)
+        try:
+            self.fill_autodj_queue(force=True)
+        finally:
+            self.autodj_startup_pending = False
         if self.player.playbackState() == QMediaPlayer.StoppedState and self.tracks:
             # fill_autodj_queue may already have started the first item. Qt can
             # report StoppedState until the asynchronous media load completes.
@@ -44,7 +72,7 @@ class AutoDJControllerMixin:
         if not hasattr(self, "music_library") or not hasattr(self, "autodj_panel"):
             return
         now_mono = time.monotonic()
-        if not force and not bypass_throttle and now_mono - self.autodj_last_fill < 3:
+        if not force and not bypass_throttle and now_mono - self.autodj_last_fill < 10:
             return
         self.autodj_last_fill = now_mono
 
@@ -52,26 +80,42 @@ class AutoDJControllerMixin:
         if not config.get("enabled") and not force:
             return
 
-        libraries = self.music_library.libraries()
-        enabled_ids = [lib["id"] for lib in libraries if lib["enabled"]]
-        program = active_program(self.autodj_programs)
-        requested_ids = program.get("library_ids", []) if program else []
-        if not isinstance(requested_ids, (list, tuple, set)):
-            requested_ids = []
-        requested_ids = list(requested_ids)
-        selected_ids = [value for value in requested_ids if value in enabled_ids]
-        if not requested_ids:
-            selected_ids = enabled_ids
-        signature = (program_signature(program), tuple(sorted(selected_ids)))
+        program, selected_ids, has_requested_libraries = self._autodj_selection()
+        signature = (program_signature(program), tuple(sorted(selected_ids, key=str)))
 
         if signature != self.autodj_last_signature:
-            self._clear_generated_autodj_tracks()
-            self.autodj_last_signature = signature
+            if getattr(self, "autodj_startup_pending", False):
+                # Preserve the queue restored from disk even if a different
+                # schedule block became active while the app was closed.
+                self.autodj_last_signature = signature
+                self.save_state()
+            else:
+                self._clear_generated_autodj_tracks()
+                self.autodj_last_signature = signature
         program_name = str(program.get("name") or "Bloco musical") if program else "Aleatório — todas as bibliotecas"
         if not selected_ids:
             self.autodj_panel.set_status(
                 "O bloco não tem bibliotecas habilitadas; ajuste sua seleção."
-                if requested_ids else "Adicione e examine pelo menos uma biblioteca habilitada.")
+                if has_requested_libraries
+                else "Adicione e examine pelo menos uma biblioteca habilitada.")
+            return
+
+        if self.current_index >= 0:
+            pending_count = max(0, len(self.tracks) - self.current_index - 1)
+            excluded = list(self.tracks[
+                self.current_index + 1 if allow_current_repeat else self.current_index:])
+        else:
+            pending_count = len(self.tracks)
+            excluded = list(self.tracks)
+        target = int(config.get("queue_ahead", 4))
+        if not config.get("enabled"):
+            target = max(target, 1) if force else 0
+        needed = max(0, target - pending_count)
+        if not needed:
+            # The scheduler checks once per second and queue filling is
+            # throttled to ten seconds. Avoid loading every indexed track
+            # and aggregating the play-history database when the queue is full.
+            self.autodj_panel.set_status(f"{program_name}: fila completa")
             return
 
         candidates = self.music_library.tracks_for_libraries(selected_ids)
@@ -82,21 +126,12 @@ class AutoDJControllerMixin:
             self.autodj_panel.set_status(message)
             return
 
-        if self.current_index >= 0:
-            pending_count = max(0, len(self.tracks) - self.current_index - 1)
-            excluded_from = self.current_index + 1 if allow_current_repeat else self.current_index
-            excluded = list(self.tracks[excluded_from:])
-        else:
-            pending_count = len(self.tracks)
-            excluded = list(self.tracks)
-        target = int(config.get("queue_ahead", 4))
-        if not config.get("enabled"):
-            target = max(target, 1) if force else 0
-        needed = max(0, target - pending_count)
-
-        raw_history = self.music_library.latest_track_plays()
-        history = (dict(raw_history[0]), dict(raw_history[1]))
         selection_time = time.time()
+        raw_history = self.music_library.latest_track_plays(
+            path_window_seconds=_cooldown_seconds(config.get("track_cooldown_minutes", 360)),
+            artist_window_seconds=_cooldown_seconds(config.get("artist_cooldown_minutes", 60)),
+            now=selection_time)
+        history = (dict(raw_history[0]), dict(raw_history[1]))
         candidate_by_path = {
             audio_path_key(track.get("path", "")): track
             for track in candidates if isinstance(track, dict) and track.get("path")
@@ -180,7 +215,7 @@ class AutoDJControllerMixin:
             metadata = read_track_metadata(path)
             self.music_library.record_play(metadata)
             if hasattr(self, "autodj_panel"):
-                self.autodj_panel.refresh_history()
+                self.autodj_panel.schedule_history_refresh()
         except Exception:
             logging.getLogger("radiostudio").exception("Falha ao registrar histórico da faixa: %s", path)
         # Playlist mutations are deferred until the media-state callback unwinds;

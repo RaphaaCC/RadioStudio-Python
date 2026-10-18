@@ -11,12 +11,14 @@ from ..config import AUDIO_EXTENSIONS
 class PlaylistTable(QTableWidget):
     """Accept audio files dragged from the built-in explorer or Windows Explorer."""
 
-    def __init__(self, add_paths, commit_order, move_selected, remove_selected, parent=None):
+    def __init__(self, add_paths, commit_order, move_selected, remove_selected,
+                 restore_order=None, parent=None):
         super().__init__(0, 3, parent)
         self.add_paths = add_paths
         self.commit_order = commit_order
         self.move_selected = move_selected
         self.remove_selected = remove_selected
+        self.restore_order = restore_order
         self._internal_drag_active = False
         self._drag_committed = False
         self._drag_items = []
@@ -33,9 +35,16 @@ class PlaylistTable(QTableWidget):
                 if url.isLocalFile() and Path(url.toLocalFile()).is_file()
                 and Path(url.toLocalFile()).suffix.lower() in AUDIO_EXTENSIONS]
 
+    @staticmethod
+    def has_audio_urls(event):
+        """Check drag metadata without hitting disk on every mouse-move event."""
+        return any(url.isLocalFile()
+                   and Path(url.toLocalFile()).suffix.lower() in AUDIO_EXTENSIONS
+                   for url in event.mimeData().urls())
+
     @guarded
     def dragEnterEvent(self, event):
-        if self._internal_drag_active or self.audio_paths(event):
+        if self._internal_drag_active or self.has_audio_urls(event):
             event.acceptProposedAction()
         else:
             event.ignore()
@@ -46,7 +55,7 @@ class PlaylistTable(QTableWidget):
             self.move_dragged_rows(event.position().toPoint())
             event.setDropAction(Qt.MoveAction)
             event.accept()
-        elif self.audio_paths(event):
+        elif self.has_audio_urls(event):
             event.acceptProposedAction()
         else:
             event.ignore()
@@ -59,8 +68,10 @@ class PlaylistTable(QTableWidget):
                 item = self.item(row, 0)
                 if item:
                     order.append((item.data(Qt.UserRole), item.data(Qt.UserRole + 1)))
-            self._drag_committed = True
-            self.commit_order(order)
+            # A failed guarded commit returns None. In that case startDrag's
+            # cleanup restores the pre-drag visual order; False means the
+            # owner rejected the order and already rebuilt from its queue.
+            self._drag_committed = self.commit_order(order) is not None
             event.setDropAction(Qt.MoveAction)
             event.accept()
             return
@@ -83,10 +94,23 @@ class PlaylistTable(QTableWidget):
         try:
             super().startDrag(supported_actions)
         finally:
-            if not self._drag_committed:
-                self.restore_drag_order()
-            self._internal_drag_active = False
-            self._drag_items = []
+            try:
+                # QAbstractItemView may remove source rows after QDrag.exec()
+                # returns MoveAction. We already reordered rows live, so that
+                # cleanup can target a different row after the indexes shift.
+                # Rebuild from the queue, which is the canonical state, after
+                # every drag (including a successful one).
+                self.restore_after_drag()
+            finally:
+                self._internal_drag_active = False
+                self._drag_items = []
+
+    @guarded
+    def restore_after_drag(self):
+        if self.restore_order is not None:
+            self.restore_order()
+        elif not self._drag_committed:
+            self.restore_drag_order()
 
     @guarded
     def move_dragged_rows(self, point):

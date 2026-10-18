@@ -62,7 +62,11 @@ class AudioPipelineMixin:
             # expensive UI update cannot delay this source's audio buffer.
             self.forward_buffer("main", buffer, self.main_gain)
             self.detect_trailing_silence(buffer)
-            self.on_air.feed_audio_buffer(buffer)
+            # Audio can continue in the tray. Do not spend CPU calculating a
+            # visualizer that cannot be seen; it will refill when shown again.
+            is_visible = getattr(self.on_air, "isVisible", None)
+            if not callable(is_visible) or is_visible():
+                self.on_air.feed_audio_buffer(buffer)
         elif (player is self.mix_player
               and player.playbackState() == QMediaPlayer.PlayingState
               and self.player.playbackState() != QMediaPlayer.PausedState):
@@ -79,16 +83,30 @@ class AudioPipelineMixin:
         remaining = duration - self.player.position()
         scan_window = trailing_silence_scan_window(
             duration, self.mix_ms, self.fade_out_ms)
-        next_duration = read_track_metadata(self.tracks[self.current_index + 1]).duration
+        if scan_window <= 0 or remaining <= 0 or remaining > scan_window:
+            self.silence_ms = 0
+            return
+
+        # This method runs for each decoded audio buffer. The next-track
+        # metadata only affects the final scan-window length, so read it once
+        # per queued path rather than stat'ing that file on every callback.
+        next_path = self.tracks[self.current_index + 1]
+        if getattr(self, "_silence_next_duration_path", None) != next_path:
+            self._silence_next_duration_path = next_path
+            try:
+                self._silence_next_duration = read_track_metadata(next_path).duration
+            except (OSError, ValueError, TypeError):
+                self._silence_next_duration = 0.0
+        next_duration = getattr(self, "_silence_next_duration", 0.0)
         if next_duration > 0:
             scan_window = min(scan_window, max(1, round(next_duration * 500)))
-        if scan_window <= 0 or remaining <= 0 or remaining > scan_window:
+        if remaining > scan_window:
             self.silence_ms = 0
             return
         try:
             import array
             samples = array.array("h")
-            samples.frombytes(bytes(buffer.data()))
+            samples.frombytes(buffer.data())
             peak = max((abs(sample) for sample in samples), default=0)
         except (ValueError, TypeError):
             return

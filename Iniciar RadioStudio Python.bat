@@ -7,7 +7,7 @@ if not exist ".venv\Scripts\python.exe" (
     if errorlevel 1 goto :error
 )
 
-".venv\Scripts\python.exe" -c "import PySide6, imageio_ffmpeg, keyring, tinytag" >nul 2>&1
+".venv\Scripts\python.exe" -c "import PySide6, imageio_ffmpeg, keyring, tinytag, pypresence" >nul 2>&1
 if errorlevel 1 (
     echo Instalando dependencias do RadioStudio Python...
     ".venv\Scripts\python.exe" -m pip install -r requirements.txt

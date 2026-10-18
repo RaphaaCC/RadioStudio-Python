@@ -7,9 +7,18 @@ import re
 import uuid
 
 from ._shared import *
+from ..config import DISCORD_APPLICATION_ID
 from ..runtime_safety import guarded
 from ..services.audio_paths import same_audio_path
 from ..services.audio_inputs import INPUT_CHANNELS
+from ..services.discord_presence import validate_public_cover_url, validate_public_radio_url
+from ..services.process_priority import apply_process_priority, normalize_process_priority
+
+
+def _tuple_tree(value):
+    if isinstance(value, list):
+        return tuple(_tuple_tree(item) for item in value)
+    return value
 
 
 def bounded_int(value, default, low, high):
@@ -33,15 +42,20 @@ def bounded_float(value, default, low, high):
 class PersistenceMixin:
     @guarded
     def capture_playback(self):
+        mix_state = self.mix_player.playbackState()
         use_mix = (self.mix_target_index >= 0 and self.mix_gain > self.main_gain
-                   and self.mix_player.playbackState() == QMediaPlayer.PlayingState)
+                   and mix_state in (QMediaPlayer.PlayingState, QMediaPlayer.PausedState))
         active_player = self.mix_player if use_mix else self.player
         path = (self.tracks[self.mix_target_index] if use_mix
                 and 0 <= self.mix_target_index < len(self.tracks)
                 else self.original_media_path(active_player))
         if path:
+            active_index = (self.mix_target_index if use_mix
+                            and 0 <= self.mix_target_index < len(self.tracks)
+                            else getattr(self, "current_index", -1))
             self.last_playback = {
                 "path": path,
+                "index": active_index,
                 "position_ms": max(0, active_player.position()),
                 "was_playing": active_player.playbackState() == QMediaPlayer.PlayingState,
             }
@@ -60,8 +74,17 @@ class PersistenceMixin:
             self.log_event("error", f"Não foi possível retomar o áudio: {path or 'arquivo ausente'}")
             self.save_state()
             return
-        index = next((i for i, candidate in enumerate(self.tracks)
-                      if same_audio_path(candidate, path)), -1)
+        index = -1
+        try:
+            saved_index = int(self.last_playback.get("index", -1))
+        except (TypeError, ValueError, OverflowError):
+            saved_index = -1
+        if (0 <= saved_index < len(self.tracks)
+                and same_audio_path(self.tracks[saved_index], path)):
+            index = saved_index
+        else:
+            index = next((i for i, candidate in enumerate(self.tracks)
+                          if same_audio_path(candidate, path)), -1)
         if index < 0:
             self.tracks.append(path)
             self.track_sources.append("manual")
@@ -93,6 +116,10 @@ class PersistenceMixin:
             self.track_sources = [source if isinstance(source, str) and source in valid_sources else "manual"
                                   for source in (saved_sources + ["manual"] * len(self.tracks))
                                   [:len(self.tracks)]]
+            saved_queue_signature = state.get("autodj_queue_signature")
+            self.autodj_last_signature = (
+                _tuple_tree(saved_queue_signature)
+                if isinstance(saved_queue_signature, list) else None)
             saved_events = state.get("events", [])
             self.events = []
             if isinstance(saved_events, list):
@@ -139,7 +166,60 @@ class PersistenceMixin:
             self.minimize_to_tray = bool(state.get("minimize_to_tray", True))
             self.resume_on_startup = bool(state.get("resume_on_startup", True))
             self.auto_start_broadcast = bool(state.get("auto_start_broadcast", False))
+            self.process_priority = normalize_process_priority(
+                state.get("process_priority", "normal"))
+            priority_applied, priority_error = apply_process_priority(self.process_priority)
+            if not priority_applied:
+                logging.getLogger("radiostudio").warning(
+                    "Não foi possível restaurar a prioridade do processo: %s", priority_error)
             self.broadcast_was_running = bool(state.get("broadcast_was_running", False))
+            # The application ID belongs to RadioStudio; users do not need to
+            # create or configure their own Discord Developer application.
+            self.discord_client_id = DISCORD_APPLICATION_ID
+            self.discord_enabled = bool(state.get("discord_enabled", False))
+            self.discord_share_track = bool(state.get("discord_share_track", True))
+            self.discord_use_track_cover = bool(state.get("discord_use_track_cover", False))
+            try:
+                self.discord_cover_url = validate_public_cover_url(
+                    state.get("discord_cover_url", ""))
+            except (TypeError, ValueError):
+                self.discord_cover_url = ""
+                self.discord_use_track_cover = False
+            try:
+                self.discord_public_url = validate_public_radio_url(
+                    state.get("discord_public_url", ""))
+            except (TypeError, ValueError):
+                self.discord_public_url = ""
+            self.discord_activity_name = str(
+                state.get("discord_activity_name", "RadioStudio Python Sirius")
+                or "RadioStudio Python Sirius")[:128]
+            try:
+                activity_type = int(state.get("discord_activity_type", 2))
+            except (TypeError, ValueError, OverflowError):
+                activity_type = 2
+            self.discord_activity_type = activity_type if activity_type in {0, 2, 3, 5} else 2
+            try:
+                display_type = int(state.get("discord_status_display_type", 0))
+            except (TypeError, ValueError, OverflowError):
+                display_type = 0
+            self.discord_status_display_type = display_type if display_type in {0, 1, 2} else 0
+            self.discord_details_template = str(
+                state.get("discord_details_template", "🎵 %title") or "🎵 %title")[:128]
+            self.discord_state_template = str(
+                state.get("discord_state_template", "%artist · %station · %status")
+                or "%artist · %station · %status")[:128]
+            self.discord_large_text = str(
+                state.get("discord_large_text", "RadioStudio Python Sirius")
+                or "RadioStudio Python Sirius")[:128]
+            self.discord_button1_label = str(
+                state.get("discord_button1_label", "Ouvir a rádio") or "Ouvir a rádio")[:32]
+            self.discord_button2_label = str(state.get("discord_button2_label", "") or "")[:32]
+            try:
+                self.discord_button2_url = validate_public_radio_url(
+                    state.get("discord_button2_url", ""))
+            except (TypeError, ValueError):
+                self.discord_button2_url = ""
+            self.discord_large_image = "radiostudio"
             saved_autodj = state.get("autodj", {})
             if isinstance(saved_autodj, dict):
                 self.autodj_config.update(saved_autodj)
@@ -170,6 +250,10 @@ class PersistenceMixin:
             self.waveform_style = (state.get("waveform_style")
                                    if isinstance(state.get("waveform_style"), str) else "bars")
             self.on_air.set_waveform_style(self.waveform_style)
+            self.waveform_visualizers_enabled = (
+                state.get("waveform_visualizers_enabled")
+                if isinstance(state.get("waveform_visualizers_enabled"), bool) else True)
+            self.on_air.set_waveform_visualizers_enabled(self.waveform_visualizers_enabled)
             playback = state.get("playback", {})
             if isinstance(playback, dict):
                 try:
@@ -179,6 +263,7 @@ class PersistenceMixin:
                 self.last_playback = {
                     "path": (playback.get("path", "")
                              if isinstance(playback.get("path", ""), str) else ""),
+                    "index": bounded_int(playback.get("index", -1), -1, -1, 1_000_000),
                     "position_ms": position_ms,
                     "was_playing": bool(playback.get("was_playing", False)),
                 }
@@ -205,6 +290,16 @@ class PersistenceMixin:
             self.autodj_panel.load_settings(self.autodj_config)
             self.autodj_panel.refresh_programs()
             self.autodj_panel.refresh_libraries()
+            # Older state files did not store the selector signature. Seed it
+            # from the current block so the first startup fill extends the
+            # saved queue instead of discarding its already-selected tracks.
+            if (self.autodj_last_signature is None
+                    and "autodj" in self.track_sources):
+                try:
+                    self.autodj_last_signature = self.current_autodj_signature()
+                except Exception:
+                    logging.getLogger("radiostudio").exception(
+                        "Não foi possível restaurar a assinatura da fila do AutoDJ")
             self.autodj_panel.refresh_history()
         except (OSError, ValueError, TypeError, KeyError) as exc:
             QMessageBox.warning(self, "Configuração", f"Não foi possível carregar os dados salvos:\n{exc}")
@@ -217,6 +312,7 @@ class PersistenceMixin:
         data = {"tracks": self.tracks, "track_sources": self.track_sources,
                 "events": self.events, "carts": self.carts,
                 "autodj": self.autodj_config, "autodj_programs": self.autodj_programs,
+                "autodj_queue_signature": self.autodj_last_signature,
                 "main_device_key": self.main_device_key,
                 "preview_device_key": self.preview_device_key,
                 "input_device_keys": self.input_device_keys,
@@ -229,7 +325,24 @@ class PersistenceMixin:
                 "minimize_to_tray": self.minimize_to_tray,
                 "resume_on_startup": self.resume_on_startup,
                 "auto_start_broadcast": self.auto_start_broadcast,
+                "process_priority": normalize_process_priority(self.process_priority),
                 "broadcast_was_running": self.broadcast_was_running,
+                "discord_client_id": DISCORD_APPLICATION_ID,
+                "discord_enabled": self.discord_enabled,
+                "discord_share_track": self.discord_share_track,
+                "discord_use_track_cover": self.discord_use_track_cover,
+                "discord_cover_url": self.discord_cover_url,
+                "discord_public_url": self.discord_public_url,
+                "discord_large_image": "radiostudio",
+                "discord_activity_name": self.discord_activity_name,
+                "discord_activity_type": self.discord_activity_type,
+                "discord_status_display_type": self.discord_status_display_type,
+                "discord_details_template": self.discord_details_template,
+                "discord_state_template": self.discord_state_template,
+                "discord_large_text": self.discord_large_text,
+                "discord_button1_label": self.discord_button1_label,
+                "discord_button2_label": self.discord_button2_label,
+                "discord_button2_url": self.discord_button2_url,
                 "fade_in_ms": self.fade_in_ms, "fade_out_ms": self.fade_out_ms,
                 "auto_transitions_enabled": self.auto_transitions_enabled,
                 "mix_ms": self.mix_ms, "trim_silence": self.trim_silence,
@@ -237,6 +350,7 @@ class PersistenceMixin:
                 "silence_hold_ms": self.silence_hold_ms,
                 "player_controls_position": self.player_controls_position,
                 "waveform_style": self.waveform_style,
+                "waveform_visualizers_enabled": self.waveform_visualizers_enabled,
                 "playback": self.last_playback,
                 "station_metadata": self.station_metadata,
                 "explorer_folder": self.explorer_folder,
@@ -244,7 +358,11 @@ class PersistenceMixin:
                 "local_broadcast": self.broadcast_panel.local_config()}
         temporary = STATE_FILE.with_name(STATE_FILE.name + ".tmp")
         try:
-            temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            # This file is machine state, not a user-edited document. Compact
+            # JSON lowers serialization time and disk writes, especially when
+            # the playback checkpoint updates it during a long session.
+            temporary.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")),
+                                  encoding="utf-8")
             os.replace(temporary, STATE_FILE)
         finally:
             try:
@@ -272,6 +390,7 @@ class PersistenceMixin:
             ("cart wall", self.stop_all_carts),
             ("entradas de áudio", self.audio_input_controller.stop_all),
             ("transmissão", self.broadcast.stop),
+            ("Discord Rich Presence", self.discord_presence.shutdown),
             ("player principal", self.player.stop),
             ("player de mix", self.mix_player.stop),
             ("decodificador alternativo", self.shutdown_audio_fallback),

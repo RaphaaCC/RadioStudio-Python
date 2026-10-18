@@ -3,9 +3,11 @@ import threading
 import time
 import unittest
 from array import array
+from unittest.mock import patch
 
 from radiostudio.services.broadcast import (
-    ENCODED_CHUNK_BYTES, FRAME_MS, PCM_BYTES_PER_FRAME, EncoderOutput, PCMBuffer,
+    ENCODED_CHUNK_BYTES, FRAME_MS, PCM_BYTES_PER_FRAME, SILENCE_PCM_FRAME,
+    EncoderOutput, PCMBuffer,
     BroadcastManager as BaseBroadcastManager, encoded_queue_capacity, reconnect_delay,
 )
 from radiostudio.services.broadcast_quality import MIX_PEAK, BroadcastManager, limit_mixed_samples
@@ -79,6 +81,47 @@ class _BrokenBuffer:
 
 
 class BroadcastQualityTests(unittest.TestCase):
+    def test_idle_mixer_reuses_silence_and_skips_sample_limiter(self):
+        manager = BroadcastManager()
+        manager.sources = {"main": (PCMBuffer(), 1.0)}
+        manager.stop_event = _StopAfterOneFrame()
+        sent = []
+        manager._feed_outputs = sent.append
+
+        with patch("radiostudio.services.broadcast_quality.limit_mixed_samples",
+                   side_effect=AssertionError("silêncio não deve passar pelo limiter")):
+            manager._mix_loop()
+
+        self.assertEqual(sent, [SILENCE_PCM_FRAME])
+        self.assertEqual(len(SILENCE_PCM_FRAME), PCM_BYTES_PER_FRAME)
+        self.assertEqual(manager.sources["main"][0].diagnostics_snapshot()[
+            "warmup_silence_frames"], 1)
+
+    def test_empty_source_path_resumes_pcm_mixing_without_dropping_samples(self):
+        manager = BroadcastManager()
+        buffer = PCMBuffer()
+        buffer.min_prebuffer_bytes = 4
+        manager.sources = {"main": (buffer, 1.0)}
+
+        self.assertIsNone(manager._mix_source_samples())
+
+        buffer.append(array("h", [1000, -1000] * (PCM_BYTES_PER_FRAME // 4)).tobytes())
+        mixed = manager._mix_source_samples()
+        self.assertIsNotNone(mixed)
+        self.assertEqual(mixed[:4], [1000, -1000, 1000, -1000])
+
+    def test_mix_uses_each_queued_pcm_blocks_captured_gain(self):
+        manager = BroadcastManager()
+        manager.outputs.append(object())
+        pcm_frame = array("h", [1000] * (PCM_BYTES_PER_FRAME // 2)).tobytes()
+
+        manager.push_audio("mix", pcm_frame * 2, 0.25)
+        manager.push_audio("mix", pcm_frame * 2, 0.75)
+
+        self.assertEqual(manager._mix_source_samples()[0], 250)
+        self.assertEqual(manager._mix_source_samples()[0], 250)
+        self.assertEqual(manager._mix_source_samples()[0], 750)
+
     def test_mixer_isolates_bad_source_and_output(self):
         for manager_type in (BaseBroadcastManager, BroadcastManager):
             with self.subTest(manager=manager_type.__name__):

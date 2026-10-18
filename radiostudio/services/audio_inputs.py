@@ -105,6 +105,14 @@ def _encode_samples(frames: list[tuple[float, float]], sample_format,
 
 def convert_input_to_master(data: bytes, audio_format: QAudioFormat) -> bytes:
     """Convert a device chunk to 44.1 kHz, stereo, signed 16-bit PCM."""
+    if (audio_format.sampleRate() == SAMPLE_RATE
+            and audio_format.channelCount() == CHANNELS
+            and audio_format.sampleFormat() == QAudioFormat.Int16):
+        frame_bytes = CHANNELS * 2
+        aligned_length = len(data) - len(data) % frame_bytes
+        if aligned_length == len(data) and isinstance(data, bytes):
+            return data
+        return bytes(data[:aligned_length])
     samples = decode_audio_samples(data, audio_format.sampleFormat())
     frames = _stereo_frames(samples, audio_format.channelCount())
     frames = _resample(frames, audio_format.sampleRate(), SAMPLE_RATE)

@@ -27,6 +27,9 @@ class _FakePlayer:
     def setSource(self, source):
         self._source = source
 
+    def mediaStatus(self):
+        return QMediaPlayer.InvalidMedia
+
 
 class _FakeAudio:
     def setVolume(self, _value):
@@ -336,6 +339,11 @@ class _PlaybackHarness(PlaybackMixin):
         self.on_air = _FakeOnAir()
         self.last_playback = {"was_playing": True}
         self.is_quitting = False
+        self.stop_pending = False
+        self._suppress_end_recovery = False
+        self._main_source_generation = 0
+        self.current_index = 0
+        self.tracks = ["bad-track.mp3", "next-track.mp3"]
         self.error_messages = []
         self.next_calls = 0
 
@@ -388,6 +396,30 @@ class PlaybackErrorTests(unittest.TestCase):
         errors = [message for kind, message in player.error_messages if kind == "error"]
         self.assertEqual(len(errors), 1)
         self.assertIn("FFmpeg ausente", errors[0])
+
+    def test_deferred_invalid_media_skip_is_canceled_after_a_new_track_is_loaded(self):
+        player = _PlaybackHarness()
+        callbacks = []
+
+        with patch("radiostudio.ui.playback.QTimer.singleShot",
+                   side_effect=lambda _delay, callback: callbacks.append(callback)):
+            PlaybackMixin.handle_invalid_main_media(player, "bad-track.mp3")
+            self.assertEqual(len(callbacks), 1)
+            PlaybackMixin.set_media_source(
+                player, player.player, "replacement-track.mp3")
+            callbacks[0]()
+
+        self.assertEqual(player.next_calls, 0)
+
+    def test_invalid_media_after_manual_stop_does_not_skip_next_track(self):
+        player = _PlaybackHarness()
+        player._suppress_end_recovery = True
+
+        with patch("radiostudio.ui.playback.QTimer.singleShot") as single_shot:
+            PlaybackMixin.handle_invalid_main_media(player, "bad-track.mp3")
+
+        single_shot.assert_not_called()
+        self.assertEqual(player.next_calls, 0)
 
     def test_end_of_media_transition_is_deferred_and_duplicate_signals_are_ignored(self):
         player = _PlaybackHarness()
@@ -753,6 +785,41 @@ class PlaybackErrorTests(unittest.TestCase):
         self.assertEqual(player.position_label.text, "02:05 / 03:00")
         self.assertEqual(player.position.value, 125000)
 
+    def test_mix_scheduler_does_not_read_next_track_tags_outside_transition_window(self):
+        starts = []
+        player = SimpleNamespace(
+            mix_target_index=-1, current_index=0,
+            tracks=["current.mp3", "next.mp3"], stop_pending=False,
+            auto_transitions_enabled=False, mix_ms=8000,
+            player=SimpleNamespace(
+                playbackState=lambda: QMediaPlayer.PlayingState,
+                duration=lambda: 180000, position=lambda: 60000),
+            start_mix=lambda *args, **kwargs: starts.append((args, kwargs)))
+
+        with patch("radiostudio.ui.playback.read_track_metadata") as read_metadata:
+            PlaybackMixin.maybe_start_mix(player)
+
+        read_metadata.assert_not_called()
+        self.assertEqual(starts, [])
+
+    def test_mix_scheduler_still_reads_and_starts_inside_transition_window(self):
+        starts = []
+        player = SimpleNamespace(
+            mix_target_index=-1, current_index=0,
+            tracks=["current.mp3", "next.mp3"], stop_pending=False,
+            auto_transitions_enabled=False, mix_ms=8000,
+            player=SimpleNamespace(
+                playbackState=lambda: QMediaPlayer.PlayingState,
+                duration=lambda: 180000, position=lambda: 175000),
+            start_mix=lambda *args, **kwargs: starts.append((args, kwargs)))
+
+        with patch("radiostudio.ui.playback.read_track_metadata",
+                   return_value=SimpleNamespace(duration=30.0)) as read_metadata:
+            PlaybackMixin.maybe_start_mix(player)
+
+        read_metadata.assert_called_once_with("next.mp3")
+        self.assertEqual(starts, [((5000,), {"cue_ms": 0})])
+
     def test_mix_promotion_updates_display_before_broadcast_cleanup(self):
         player = _PromotionHarness()
         metadata = SimpleNamespace(
@@ -812,6 +879,15 @@ class PlaybackErrorTests(unittest.TestCase):
 
         self.assertEqual(player.events, ["broadcast", "visualizer"])
 
+    def test_hidden_window_skips_visualizer_but_keeps_broadcast_audio(self):
+        player = _AudioPipelineHarness()
+        player.player.state = QMediaPlayer.PlayingState
+        player.on_air.isVisible = lambda: False
+
+        player.handle_player_audio_buffer(player.player, _ValidBuffer())
+
+        self.assertEqual(player.events, ["broadcast"])
+
     def test_late_mix_start_is_paused_when_main_deck_is_paused(self):
         player = _GainHarness()
         player.player = _StatePlayer(QMediaPlayer.PausedState)
@@ -844,6 +920,55 @@ class PlaybackErrorTests(unittest.TestCase):
         self.assertEqual(trailing_silence_scan_window(240000, 30000, 30000), 15000)
         self.assertEqual(trailing_silence_scan_window(20000, 30000, 30000), 5000)
         self.assertEqual(trailing_silence_scan_window(240000, 0, 0), 6000)
+
+    def test_silence_detection_does_not_read_next_track_metadata_before_tail(self):
+        player = SimpleNamespace(
+            trim_silence=True, mix_target_index=-1, current_index=0,
+            tracks=["current.mp3", "next.mp3"], mix_ms=0, fade_out_ms=0,
+            player=SimpleNamespace(duration=lambda: 240000, position=lambda: 1000),
+            silence_ms=0)
+        with patch("radiostudio.ui.audio_pipeline.read_track_metadata") as read_metadata:
+            AudioPipelineMixin.detect_trailing_silence(player, None)
+
+        read_metadata.assert_not_called()
+
+    def test_silence_detection_reads_next_duration_once_per_queue_path(self):
+        from array import array
+
+        pcm = array("h", [20000] * 1024).tobytes()
+        audio_format = SimpleNamespace(sampleRate=lambda: 44100, channelCount=lambda: 2)
+        buffer = SimpleNamespace(data=lambda: pcm, format=lambda: audio_format)
+        player = SimpleNamespace(
+            trim_silence=True, mix_target_index=-1, current_index=0,
+            tracks=["current.mp3", "next.mp3"], mix_ms=0, fade_out_ms=0,
+            player=SimpleNamespace(duration=lambda: 240000, position=lambda: 239000),
+            silence_ms=0, silence_threshold_db=-42, silence_hold_ms=1200,
+            start_mix=lambda *_args, **_kwargs: self.fail("não deve iniciar mix em áudio alto"))
+        with patch("radiostudio.ui.audio_pipeline.read_track_metadata",
+                   return_value=SimpleNamespace(duration=180)) as read_metadata:
+            for _ in range(3):
+                AudioPipelineMixin.detect_trailing_silence(player, buffer)
+            read_metadata.assert_called_once_with("next.mp3")
+
+            player.tracks[1] = "other.mp3"
+            AudioPipelineMixin.detect_trailing_silence(player, buffer)
+            self.assertEqual(read_metadata.call_count, 2)
+
+    def test_transition_analysis_cache_is_bounded_during_long_sessions(self):
+        from radiostudio.ui.playback import MAX_TRANSITION_ANALYSES
+
+        analyses = {f"track-{index}.mp3": None
+                    for index in range(MAX_TRANSITION_ANALYSES)}
+        player = SimpleNamespace(
+            transition_analyses=analyses, auto_transitions_enabled=False,
+            is_quitting=True,
+        )
+
+        PlaybackMixin.transition_analysis_ready(player, "new-track.mp3", None)
+
+        self.assertEqual(len(analyses), MAX_TRANSITION_ANALYSES)
+        self.assertNotIn("track-0.mp3", analyses)
+        self.assertIn("new-track.mp3", analyses)
 
     def test_seeking_during_crossfade_cancels_the_pending_deck(self):
         player = _GainHarness()

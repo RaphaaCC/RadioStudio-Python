@@ -37,6 +37,25 @@ class AudioPathTests(unittest.TestCase):
 
         self.assertEqual(paths[audio_path_key(r"C:\Music\Song.mp3")], 2000)
 
+    def test_autodj_history_query_limits_rows_to_repeat_cooldowns(self):
+        with tempfile.TemporaryDirectory() as folder:
+            library = MusicLibrary(Path(folder) / "library.sqlite3")
+            with library._connect() as db:
+                db.executemany(
+                    "INSERT INTO play_history(played_at, path, title, artist) VALUES(?, ?, ?, ?)",
+                    [(1998, "recent.mp3", "Recent", "Band"),
+                     (1920, "within-track-window.mp3", "Within", "BAND"),
+                     (1800, "expired.mp3", "Expired", "Old Artist")])
+
+            paths, artists = library.latest_track_plays(
+                path_window_seconds=100, artist_window_seconds=50, now=2000)
+
+        self.assertEqual(paths, {
+            audio_path_key("recent.mp3"): 1998,
+            audio_path_key("within-track-window.mp3"): 1920,
+        })
+        self.assertEqual(artists, {"band": 1998})
+
 
 if __name__ == "__main__":
     unittest.main()

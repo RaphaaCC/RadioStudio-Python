@@ -26,6 +26,17 @@ class AudioInputConversionTests(unittest.TestCase):
 
         self.assertEqual(struct.unpack("<hhhh", result), (12000, 12000, -12000, -12000))
 
+    def test_master_format_input_skips_sample_unpack_and_reencode(self):
+        audio_format = QAudioFormat()
+        audio_format.setSampleRate(SAMPLE_RATE)
+        audio_format.setChannelCount(2)
+        audio_format.setSampleFormat(QAudioFormat.Int16)
+        source = struct.pack("<hhhh", 12000, -12000, 8000, -8000)
+
+        result = convert_input_to_master(source, audio_format)
+
+        self.assertIs(result, source)
+
     def test_float_48khz_input_is_resampled_to_44_1khz(self):
         audio_format = QAudioFormat()
         audio_format.setSampleRate(48000)

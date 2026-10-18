@@ -8,7 +8,7 @@ import subprocess
 
 
 def run() -> int:
-    from .config import ABOUT_LOGO_FILE, APP_DIR, APP_ICON_FILE, ASSET_DIR
+    from .config import ABOUT_LOGO_FILE, APP_DIR, APP_ICON_FILE, ASSET_DIR, USER_MANUAL_FILE
 
     try:
         from PySide6.QtWidgets import QApplication
@@ -18,13 +18,15 @@ def run() -> int:
         missing_assets = [
             name for name in (
                 "icon.ico", "icon.png", "logo-about-window.png",
-                "microphone.png", "python-transmission.png",
+                "microphone.png", "python-transmission.png", "manual_usuario.pdf",
             ) if not (ASSET_DIR / name).is_file()
         ]
         if missing_assets:
             raise FileNotFoundError("Recursos ausentes: " + ", ".join(missing_assets))
         if not APP_ICON_FILE.is_file() or not ABOUT_LOGO_FILE.is_file():
             raise FileNotFoundError("Ícone ou imagem da janela Sobre não foi incluído")
+        if not USER_MANUAL_FILE.is_file() or USER_MANUAL_FILE.stat().st_size < 10_000:
+            raise FileNotFoundError("Manual PDF não foi incluído ou está incompleto")
 
         from imageio_ffmpeg import get_ffmpeg_exe
 

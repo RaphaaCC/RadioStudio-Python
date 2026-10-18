@@ -5,6 +5,7 @@ import threading
 import time
 import unittest
 from unittest.mock import patch
+from urllib.error import HTTPError
 from urllib.request import urlopen
 
 from radiostudio.services.broadcast import (
@@ -116,6 +117,59 @@ class BroadcastStartupTests(unittest.TestCase):
             self.assertEqual(data["audio_diagnostics"]["mixer"]["overruns"], 0)
         finally:
             server.stop()
+
+    def test_embedded_server_serves_cover_only_when_enabled(self):
+        cover = b"test-image-bytes"
+        server = LocalStreamServer("127.0.0.1", 0, 10, "Test", send_cover_art=True)
+        server.set_cover_art(cover, "image/png")
+        server.start()
+        try:
+            base_url = f"http://127.0.0.1:{server.server.server_address[1]}"
+            with urlopen(base_url + "/status.json", timeout=2) as response:
+                status = json.load(response)
+            self.assertEqual(status["cover_url"], "/cover")
+            self.assertEqual(status["cover_mime_type"], "image/png")
+            with urlopen(base_url + status["cover_url"], timeout=2) as response:
+                self.assertEqual(response.headers.get_content_type(), "image/png")
+                self.assertEqual(response.read(), cover)
+            cache_busted_cover = base_url + status["cover_url"] + "?rs_cover=cache-key"
+            with urlopen(cache_busted_cover, timeout=2) as response:
+                self.assertEqual(response.read(), cover)
+        finally:
+            server.stop()
+
+    def test_embedded_server_hides_cover_when_disabled(self):
+        server = LocalStreamServer("127.0.0.1", 0, 10, "Test", send_cover_art=False)
+        server.set_cover_art(b"must-not-leak", "image/jpeg")
+        server.start()
+        try:
+            base_url = f"http://127.0.0.1:{server.server.server_address[1]}"
+            with urlopen(base_url + "/status.json", timeout=2) as response:
+                status = json.load(response)
+            self.assertIsNone(status["cover_url"])
+            self.assertEqual(status["cover_mime_type"], "")
+            with self.assertRaises(HTTPError) as error:
+                urlopen(base_url + "/cover", timeout=2)
+            self.assertEqual(error.exception.code, 404)
+            error.exception.close()
+        finally:
+            server.stop()
+
+    def test_cover_delivery_can_be_toggled_without_losing_current_art(self):
+        server = LocalStreamServer("127.0.0.1", 0, 10, "Test", send_cover_art=True)
+        manager = BroadcastManager()
+        manager.local_server = server
+        manager.cover_art_data = b"current-cover"
+        manager.cover_art_mime_type = "image/jpeg"
+        manager.set_cover_art(manager.cover_art_data, manager.cover_art_mime_type)
+
+        manager.set_cover_art_enabled(False)
+        self.assertFalse(server.send_cover_art)
+        self.assertIsNone(server.cover_art_data)
+        manager.set_cover_art_enabled(True)
+        self.assertTrue(server.send_cover_art)
+        self.assertEqual(server.cover_art_data, b"current-cover")
+        self.assertEqual(server.cover_art_mime_type, "image/jpeg")
 
     def test_shoutcast_authentication_accepts_fragmented_status_line(self):
         sock = _FragmentedSocket(b"OK2\n")

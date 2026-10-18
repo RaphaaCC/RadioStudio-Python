@@ -1,12 +1,13 @@
 """Main RadioStudio window shell and UI assembly."""
 
+import hashlib
 import logging
 import tempfile
 import uuid
 from pathlib import Path
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QPixmap
+from PySide6.QtCore import QFileSystemWatcher, Qt, QTimer
+from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QLabel, QVBoxLayout)
 
 from ._shared import *
@@ -30,8 +31,13 @@ from ..services.music_library import MusicLibrary
 from ..services.audio_inputs import AudioInputController, INPUT_CHANNELS
 from ..services.transition_analysis import TransitionAnalyzer
 from ..services.audio_decode_fallback import AudioDecodeFallback
-from ..config import ABOUT_LOGO_FILE, APP_NAME, APP_VERSION
+from ..services.discord_presence import DiscordPresenceService, make_activity
+from ..services.audio_paths import audio_path_key, same_audio_path
+from ..services.cover_art import CoverArtLoader
+from ..config import (ABOUT_LOGO_FILE, APP_NAME, APP_VERSION, DISCORD_APPLICATION_ID,
+                      USER_MANUAL_FILE)
 from .icons import app_icon, apply_app_icon
+from .studio_widgets import CoverArtLabel
 
 
 class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControllerMixin,
@@ -60,6 +66,9 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         self.autodj_programs = []
         self.autodj_last_signature = None
         self.autodj_last_fill = 0.0
+        # The one-second scheduler tick can fill AutoDJ before the delayed
+        # startup hook. Keep the restored queue intact through that first fill.
+        self.autodj_startup_pending = True
         self.carts = ["" for _ in range(25)]
         self.current_index = -1
         self.last_fired = set()
@@ -81,9 +90,32 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         self.minimize_to_tray = True
         self.resume_on_startup = True
         self.auto_start_broadcast = False
+        self.process_priority = "normal"
         self.broadcast_was_running = False
+        self.discord_client_id = DISCORD_APPLICATION_ID
+        self.discord_enabled = False
+        self.discord_share_track = True
+        self.discord_use_track_cover = False
+        self.discord_cover_url = ""
+        self._discord_cover_version = ""
+        self.discord_public_url = ""
+        self.discord_large_image = "radiostudio"
+        self.discord_activity_name = "RadioStudio Python Sirius"
+        self.discord_activity_type = 2
+        self.discord_status_display_type = 0
+        self.discord_details_template = "🎵 %title"
+        self.discord_state_template = "%artist · %station · %status"
+        self.discord_large_text = "RadioStudio Python Sirius"
+        self.discord_button1_label = "Ouvir a rádio"
+        self.discord_button2_label = ""
+        self.discord_button2_url = ""
+        self.discord_presence = DiscordPresenceService(self)
+        self._discord_track_signature = None
+        self._discord_track_started_at = 0
+        self._discord_metadata_cache = {}
         self.player_controls_position = "bottom"
         self.waveform_style = "bars"
+        self.waveform_visualizers_enabled = True
         self.fade_in_ms = 0
         self.fade_out_ms = 0
         self.mix_ms = 0
@@ -109,8 +141,11 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         self.pending_transition_kind = None
         self._media_end_generation = 0
         self._pending_media_end = None
+        self._main_source_generation = 0
         self.mix_failed_key = None
         self.silence_ms = 0
+        self._silence_next_duration_path = None
+        self._silence_next_duration = 0.0
         self.stop_pending = False
         self._suppress_end_recovery = False
         self.last_playback = {"path": "", "position_ms": 0, "was_playing": False}
@@ -185,9 +220,19 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         self.transition_timer.timeout.connect(self.run_pending_transition_action)
         self.cart_players = []
         self.build_ui()
+        self.on_air.cover_art.cover_clicked.connect(
+            lambda image: self.show_cover_preview(image, "Capa da faixa no ar"))
+        self.selected_cover_art.cover_clicked.connect(
+            lambda image: self.show_cover_preview(image, "Capa da faixa selecionada"))
+        self.cover_art_loader = CoverArtLoader(self)
+        self.cover_art_loader.artwork_ready.connect(self.apply_cover_art)
+        self.on_air.track_changed.connect(self.request_on_air_cover)
+        self.playlist.itemSelectionChanged.connect(self.request_selected_cover)
         QApplication.instance().styleHints().colorSchemeChanged.connect(self.refresh_event_colors)
         self.load_event_log()
         self.load_state()
+        self.request_selected_cover()
+        self.discord_presence.configure(self.discord_client_id, self.discord_enabled)
         if self.music_library_fallback:
             message = "Banco de bibliotecas indisponível; AutoDJ está usando um índice temporário."
             self.log_event("error", message)
@@ -260,16 +305,40 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         self.explorer_search.textChanged.connect(self.filter_explorer)
         self.explorer_search.hide()
         browser_layout.addWidget(self.explorer_search)
+        self.explorer_filter_timer = QTimer(self)
+        self.explorer_filter_timer.setSingleShot(True)
+        self.explorer_filter_timer.setInterval(180)
+        self.explorer_filter_timer.timeout.connect(self.apply_explorer_filter)
         self.explorer_path = QLineEdit()
         self.explorer_path.setPlaceholderText("Caminho da pasta")
         self.explorer_path.hide()
         self.explorer_path.returnPressed.connect(
             lambda: self.open_explorer_folder(self.explorer_path.text(), persist=True))
         self.file_model = QFileSystemModel(self)
+        # QFileSystemModel reacts to every filesystem notification. When a
+        # downloader creates many tracks in the open folder, rescanning once
+        # per file can keep a CPU core busy. ExplorerMixin replaces that with
+        # a debounced directory watcher and refreshes after the burst settles.
+        self.file_model.setOption(QFileSystemModel.Option.DontWatchForChanges, True)
         self.file_model.setFilter(QDir.AllDirs | QDir.Files | QDir.NoDotAndDotDot)
         self.file_model.setNameFilters([f"*{extension}" for extension in sorted(AUDIO_EXTENSIONS)])
         self.file_model.setNameFilterDisables(False)
         self.file_model.setRootPath("")
+        self._explorer_watcher = QFileSystemWatcher(self)
+        self._explorer_watcher.directoryChanged.connect(self.queue_explorer_refresh)
+        self._explorer_refresh_timer = QTimer(self)
+        self._explorer_refresh_timer.setSingleShot(True)
+        self._explorer_refresh_timer.setInterval(750)
+        self._explorer_refresh_timer.timeout.connect(self.refresh_explorer_folder)
+        self._explorer_last_refresh_at = 0.0
+        self._explorer_expanded_paths = set()
+        self._explorer_mode_switching = False
+        self._explorer_restore_state = None
+        self._explorer_restore_timer = QTimer(self)
+        self._explorer_restore_timer.setSingleShot(True)
+        self._explorer_restore_timer.setInterval(10000)
+        self._explorer_restore_timer.timeout.connect(self.discard_explorer_restore_state)
+        self.file_model.directoryLoaded.connect(self.restore_explorer_view_state)
         self.explorer = QTreeView()
         self.explorer.setModel(self.file_model)
         self.explorer.setRootIndex(QModelIndex())
@@ -285,6 +354,8 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         self.explorer.setDragEnabled(True)
         self.explorer.setDragDropMode(QTreeView.DragOnly)
         self.explorer.setSelectionMode(QTreeView.ExtendedSelection)
+        self.explorer.expanded.connect(self.remember_explorer_expansion)
+        self.explorer.collapsed.connect(self.forget_explorer_expansion)
         self.explorer.doubleClicked.connect(self.explorer_double_clicked)
         browser_layout.addWidget(self.explorer, 1)
         self.explorer_path.setMaximumHeight(24)
@@ -335,7 +406,8 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
             toolbar.addWidget(button, index // 4, index % 4)
         playlist_layout.addLayout(toolbar)
         self.playlist = PlaylistTable(self.add_audio_paths, self.commit_playlist_order,
-                                      self.move_selected_tracks, self.remove_selected_tracks)
+                                      self.move_selected_tracks, self.remove_selected_tracks,
+                                      restore_order=lambda: self.refresh_playlist(force=True))
         self.playlist.setHorizontalHeaderLabels(["Título", "Artista", "Álbum"])
         self.playlist.verticalHeader().setDefaultSectionSize(32)
         self.playlist.verticalHeader().setMinimumWidth(38)
@@ -373,7 +445,7 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         self.schedule.setSelectionBehavior(QTableWidget.SelectRows)
         self.schedule.setEditTriggers(QTableWidget.NoEditTriggers)
         schedule_layout.addWidget(self.schedule)
-        tabs.addTab(schedule_page, "Agendador")
+        tabs.addTab(schedule_page, "📅 Agendador")
 
         cart_page = QWidget()
         cart_layout = QGridLayout(cart_page)
@@ -386,7 +458,7 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
             button.customContextMenuRequested.connect(lambda point, i=index: self.cart_menu(i))
             cart_layout.addWidget(button, index // 5, index % 5)
             self.cart_buttons.append(button)
-        tabs.addTab(cart_page, "Cart wall")
+        tabs.addTab(cart_page, "🎛️ Cart wall")
         self.audio_inputs_panel = AudioInputsPanel(self.show_settings)
         self.audio_inputs_panel.input_toggled.connect(self.set_audio_input_active)
         inputs_scroll = QScrollArea()
@@ -397,7 +469,7 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         broadcast_scroll = QScrollArea()
         broadcast_scroll.setWidgetResizable(True)
         broadcast_scroll.setWidget(self.broadcast_panel)
-        tabs.addTab(broadcast_scroll, "Transmissão")
+        tabs.addTab(broadcast_scroll, "📡 Transmissão")
         self.autodj_panel = AutoDJPanel(self)
         tabs.addTab(self.autodj_panel, "🤖 AutoDJ")
         splitter.addWidget(tabs)
@@ -407,6 +479,7 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         self.clock_timer = QTimer(self)
         self.clock_timer.timeout.connect(self.clock.update_time)
         self.clock_timer.timeout.connect(self.refresh_playback_display)
+        self.clock_timer.timeout.connect(self.sync_discord_presence)
         self.clock_timer.start(1000)
         music_folder = QStandardPaths.writableLocation(QStandardPaths.MusicLocation)
         self.open_explorer_folder(
@@ -418,6 +491,12 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(3, 3, 3, 3)
         layout.setSpacing(3)
+        selected_cover_row = QHBoxLayout()
+        selected_cover_row.addStretch(1)
+        self.selected_cover_art = CoverArtLabel(
+            112, panel, "da faixa selecionada na Now Playing")
+        selected_cover_row.addWidget(self.selected_cover_art)
+        layout.addLayout(selected_cover_row)
         transport = QHBoxLayout()
         transport.setSpacing(4)
         for label, handler in [("▶ Reproduzir", self.play_selected), ("⏸ Pausar", self.pause),
@@ -444,6 +523,70 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         timeline.addWidget(self.position_label)
         layout.addLayout(timeline)
         return panel
+
+    @guarded
+    def request_on_air_cover(self, path: str):
+        self._discord_cover_version = ""
+        self.on_air.cover_art.set_cover_image(None)
+        self.broadcast.set_cover_art(None)
+        if path:
+            self.cover_art_loader.request(path)
+
+    @guarded
+    def request_selected_cover(self):
+        row = self.playlist.currentRow()
+        item = self.playlist.item(row, 0) if row >= 0 else None
+        path = str(item.data(Qt.UserRole) or "") if item else ""
+        self.selected_cover_art.set_cover_image(None)
+        if path:
+            self.cover_art_loader.request(path)
+
+    @guarded
+    def apply_cover_art(self, path: str, artwork):
+        if not path:
+            return
+        current_path = getattr(self.on_air, "_track_path", "")
+        if same_audio_path(current_path, path):
+            image = artwork.image if artwork is not None else None
+            self.on_air.cover_art.set_cover_image(image)
+            self.broadcast.set_cover_art(
+                artwork.data if artwork is not None else None,
+                artwork.mime_type if artwork is not None else "")
+            self._discord_cover_version = (
+                hashlib.blake2s(artwork.data, digest_size=8).hexdigest()
+                if artwork is not None else "")
+            self.sync_discord_presence()
+
+        row = self.playlist.currentRow()
+        item = self.playlist.item(row, 0) if row >= 0 else None
+        selected_path = str(item.data(Qt.UserRole) or "") if item else ""
+        if same_audio_path(selected_path, path):
+            self.selected_cover_art.set_cover_image(
+                artwork.image if artwork is not None else None)
+
+    @guarded
+    def show_cover_preview(self, image, title: str = "Visualizar capa"):
+        if image is None or image.isNull():
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        apply_app_icon(dialog)
+        available = self.screen().availableGeometry()
+        max_width = max(200, min(900, available.width() - 80))
+        max_height = max(200, min(800, available.height() - 140))
+        pixmap = QPixmap.fromImage(image).scaled(
+            max_width, max_height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        layout = QVBoxLayout(dialog)
+        preview = QLabel(dialog)
+        preview.setAlignment(Qt.AlignCenter)
+        preview.setPixmap(pixmap)
+        layout.addWidget(preview)
+        buttons = QDialogButtonBox(QDialogButtonBox.Close, dialog)
+        buttons.rejected.connect(dialog.accept)
+        buttons.accepted.connect(dialog.accept)
+        layout.addWidget(buttons)
+        dialog.resize(pixmap.width() + 24, pixmap.height() + 64)
+        dialog.exec()
 
     @guarded
     def set_player_controls_position(self, position):
@@ -493,7 +636,23 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         add(preferences, "Preferências...", self.show_settings, "Ctrl+P")
 
         help_menu = bar.addMenu("A&juda")
+        add(help_menu, "Manual do usuário", self.open_user_manual)
+        help_menu.addSeparator()
         add(help_menu, f"Sobre o {APP_NAME}", self.show_about)
+
+    @guarded
+    def open_user_manual(self):
+        if not USER_MANUAL_FILE.is_file():
+            QMessageBox.warning(
+                self, "Manual não encontrado",
+                "O PDF do manual não está disponível. Reinstale ou atualize o RadioStudio.",
+            )
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(USER_MANUAL_FILE))):
+            QMessageBox.warning(
+                self, "Não foi possível abrir o manual",
+                "O Windows não encontrou um aplicativo padrão para arquivos PDF.",
+            )
 
     @guarded
     def show_about(self):
@@ -519,6 +678,9 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
             "Automação de áudio, playlist e transmissão.<br><br>"
             "Desenvolvido por Raemi Labs<br>"
             "Autor: Raphael Cherfem Carlini<br>"
+            "Apoiado e testado por:<br>"
+            "- Gabriel Sousa<br>"
+            "Contato: <a href=\"mailto:contato@gabastt.shop\">contato@gabastt.shop</a><br>"
             "© 2026 Raemi Labs<br><br>"
             "<b>Idioma:</b> disponível somente em Português nesta versão.<br>"
             "<b>Relatar bugs:</b> "
@@ -534,6 +696,96 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         buttons.accepted.connect(dialog.accept)
         layout.addWidget(buttons)
         dialog.exec()
+
+    @guarded
+    def sync_discord_presence(self):
+        if not self.discord_client_id:
+            self.discord_presence.set_activity({})
+            return
+
+        main_state = self.player.playbackState()
+        mix_state = self.mix_player.playbackState()
+        use_mix = (self.mix_target_index >= 0 and self.mix_gain > self.main_gain
+                   and mix_state in (QMediaPlayer.PlayingState, QMediaPlayer.PausedState))
+        active_player = self.mix_player if use_mix else self.player
+        active_state = mix_state if use_mix else main_state
+        active_index = self.mix_target_index if use_mix else self.current_index
+        playing = active_state == QMediaPlayer.PlayingState
+        paused = active_state == QMediaPlayer.PausedState
+        broadcasting = bool(self.broadcast.running)
+
+        metadata = None
+        if (playing or paused) and 0 <= active_index < len(self.tracks):
+            track_path = self.tracks[active_index]
+            path_key = audio_path_key(track_path)
+            metadata = self._discord_metadata_cache.get(path_key)
+            if metadata is None:
+                metadata = read_track_metadata(track_path)
+                # Rich Presence is refreshed every second. Keep a small cache so
+                # tag parsing and filesystem access happen once per track, not
+                # once per UI tick. Queue edits and removals can visit many
+                # tracks, so cap retained metadata to a few recent entries.
+                if len(self._discord_metadata_cache) >= 8:
+                    self._discord_metadata_cache.pop(next(iter(self._discord_metadata_cache)))
+                self._discord_metadata_cache[path_key] = metadata
+        if metadata:
+            signature = metadata.path
+            if signature != self._discord_track_signature:
+                self._discord_track_signature = signature
+                self._discord_track_started_at = int(time.time() - max(0, active_player.position()) / 1000)
+            start_time = self._discord_track_started_at
+            duration_ms = max(0, int(active_player.duration()))
+            duration_seconds = duration_ms / 1000 if duration_ms else metadata.duration
+            end_time = start_time + int(duration_seconds) if duration_seconds > 0 else None
+            title, artist = metadata.title, metadata.artist
+        else:
+            self._discord_track_signature = None
+            self._discord_track_started_at = 0
+            start_time = end_time = None
+            title = artist = ""
+
+        try:
+            activity = make_activity(
+                title=title, artist=artist, album=metadata.album if metadata else "",
+                station=self.station_metadata.get("name", "RadioStudio Python"),
+                broadcasting=broadcasting, playing=playing, paused=paused,
+                share_track=self.discord_share_track,
+                public_url=self.discord_public_url,
+                large_image=self.discord_large_image,
+                cover_url=(self.discord_cover_url if self.discord_use_track_cover else ""),
+                cover_version=self._discord_cover_version,
+                activity_name=self.discord_activity_name,
+                activity_type=self.discord_activity_type,
+                status_display_type=self.discord_status_display_type,
+                details_template=self.discord_details_template,
+                state_template=self.discord_state_template,
+                large_text=self.discord_large_text,
+                button1_label=self.discord_button1_label,
+                button2_label=self.discord_button2_label,
+                button2_url=self.discord_button2_url,
+                started_at=start_time, ends_at=end_time)
+        except ValueError as exc:
+            logging.getLogger("radiostudio.discord").warning(
+                "Link público de Rich Presence ignorado: %s", exc)
+            self.discord_public_url = ""
+            self.discord_button2_url = ""
+            activity = make_activity(
+                title=title, artist=artist, album=metadata.album if metadata else "",
+                station=self.station_metadata.get("name", "RadioStudio Python"),
+                broadcasting=broadcasting, playing=playing, paused=paused,
+                share_track=self.discord_share_track,
+                large_image=self.discord_large_image,
+                activity_name=self.discord_activity_name,
+                activity_type=self.discord_activity_type,
+                status_display_type=self.discord_status_display_type,
+                details_template=self.discord_details_template,
+                state_template=self.discord_state_template,
+                large_text=self.discord_large_text,
+                button1_label=self.discord_button1_label,
+                button2_label=self.discord_button2_label,
+                button2_url=self.discord_button2_url,
+                started_at=start_time, ends_at=end_time)
+        self.discord_presence.set_activity(activity)
 
     @guarded
     def setup_tray(self):

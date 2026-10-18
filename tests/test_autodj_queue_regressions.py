@@ -1,10 +1,12 @@
 import tempfile
 import unittest
+import json
 from pathlib import Path
 from unittest.mock import patch
 
-from radiostudio.services.autodj import choose_track, reserve_track
+from radiostudio.services.autodj import choose_track, program_signature, reserve_track
 from radiostudio.ui.autodj_controller import AutoDJControllerMixin
+from radiostudio.ui.persistence import _tuple_tree
 
 
 class _AutoDJQueueHarness(AutoDJControllerMixin):
@@ -29,6 +31,85 @@ class _AutoDJQueueHarness(AutoDJControllerMixin):
 
 
 class AutoDJQueueRegressionTests(unittest.TestCase):
+    def test_saved_autodj_signature_round_trips_with_legacy_library_id_types(self):
+        signature = (program_signature(None), (1, "2"))
+        restored = _tuple_tree(json.loads(json.dumps(signature)))
+
+        self.assertEqual(restored, signature)
+
+    def test_first_startup_fill_preserves_saved_generated_tracks(self):
+        class Library:
+            @staticmethod
+            def libraries():
+                return [{"id": 7, "enabled": True}]
+
+            @staticmethod
+            def tracks_for_libraries(_library_ids):
+                return [{"path": "candidate.mp3", "artist": "Artist"}]
+
+            @staticmethod
+            def latest_track_plays(**_kwargs):
+                return {}, {}
+
+        class Panel:
+            @staticmethod
+            def set_status(_status):
+                pass
+
+        player = _AutoDJQueueHarness()
+        player.tracks = ["current.mp3", "saved-next.mp3"]
+        player.track_sources = ["manual", "autodj"]
+        player.autodj_config = {"enabled": True, "queue_ahead": 1}
+        player.autodj_programs = []
+        player.autodj_last_signature = (("previous-block",), (7,))
+        player.autodj_last_fill = 0.0
+        player.autodj_startup_pending = True
+        player.music_library = Library()
+        player.autodj_panel = Panel()
+        player.refresh_playlist = lambda: None
+        player.save_state = lambda: None
+
+        with patch("radiostudio.ui.autodj_controller.time.monotonic", return_value=100):
+            AutoDJControllerMixin.fill_autodj_queue(player, force=True)
+
+        self.assertEqual(player.tracks, ["current.mp3", "saved-next.mp3"])
+        self.assertEqual(player.track_sources, ["manual", "autodj"])
+
+    def test_unavailable_program_library_reports_status(self):
+        class Library:
+            @staticmethod
+            def libraries():
+                return [{"id": 7, "enabled": True}]
+
+        class Panel:
+            status = ""
+
+            def set_status(self, status):
+                self.status = status
+
+        player = AutoDJControllerMixin()
+        player.music_library = Library()
+        player.autodj_panel = Panel()
+        player.autodj_programs = []
+        player.autodj_config = {"enabled": True}
+        player.autodj_last_signature = None
+        player.autodj_last_fill = 0.0
+        player.autodj_startup_pending = False
+        player.current_index = -1
+        player.tracks = []
+        player.track_sources = []
+        player.refresh_playlist = lambda: None
+        player.save_state = lambda: None
+        unavailable_program = {"name": "Bloco", "library_ids": [99], "filters": {}}
+
+        with patch("radiostudio.ui.autodj_controller.active_program",
+                   return_value=unavailable_program), patch(
+                       "radiostudio.ui.autodj_controller.time.monotonic", return_value=10):
+            AutoDJControllerMixin.fill_autodj_queue(player, force=True)
+
+        self.assertEqual(player.autodj_panel.status,
+                         "O bloco não tem bibliotecas habilitadas; ajuste sua seleção.")
+
     def test_autodj_does_not_requeue_a_track_with_different_path_slashes(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "queued.mp3"
@@ -66,6 +147,43 @@ class AutoDJQueueRegressionTests(unittest.TestCase):
             AutoDJControllerMixin.fill_autodj_queue(player, bypass_throttle=True)
 
         self.assertEqual(player.tracks, [])
+
+    def test_full_queue_skips_library_candidates_and_history_queries(self):
+        class Library:
+            def libraries(self):
+                return [{"id": "music", "enabled": True}]
+
+            def tracks_for_libraries(self, _library_ids):
+                raise AssertionError("fila completa não deve carregar as faixas indexadas")
+
+            def latest_track_plays(self):
+                raise AssertionError("fila completa não deve consultar o histórico")
+
+        class Panel:
+            status = ""
+
+            def set_status(self, status):
+                self.status = status
+
+        player = AutoDJControllerMixin()
+        player.music_library = Library()
+        player.autodj_panel = Panel()
+        player.autodj_config = {"enabled": True, "queue_ahead": 1}
+        player.autodj_programs = []
+        player.autodj_last_signature = None
+        player.autodj_last_fill = 0.0
+        player.autodj_startup_pending = False
+        player.current_index = 0
+        player.tracks = ["current.mp3", "next.mp3"]
+        player.track_sources = ["manual", "manual"]
+        player.refresh_playlist = lambda: None
+        player.save_state = lambda: None
+
+        with patch("radiostudio.ui.autodj_controller.time.monotonic", return_value=10):
+            AutoDJControllerMixin.fill_autodj_queue(player)
+
+        self.assertEqual(player.autodj_panel.status,
+                         "Aleatório — todas as bibliotecas: fila completa")
 
     def test_reserved_queue_artist_obeys_artist_cooldown(self):
         with tempfile.TemporaryDirectory() as folder:

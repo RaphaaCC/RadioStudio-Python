@@ -9,7 +9,7 @@ from PySide6.QtGui import QIcon
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from .config import APP_DIR, APP_DISPLAY_NAME, APP_ICON_FILE, APP_NAME, INSTANCE_NAME
+from .config import APP_DIR, APP_ICON_FILE, APP_NAME, INSTANCE_NAME
 from .runtime_safety import configure_exception_logging, guarded
 from .ui.main_window import RadioStudio
 from .ui.icons import apply_app_icon
@@ -40,7 +40,9 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     app.setApplicationName(APP_NAME)
-    app.setApplicationDisplayName(APP_DISPLAY_NAME)
+    # On Windows, Qt appends applicationDisplayName to every native dialog
+    # caption. The main window already sets its full name and version itself.
+    app.setApplicationDisplayName("")
     app.setWindowIcon(QIcon(str(APP_ICON_FILE)))
     existing = QLocalSocket(app)
     existing.connectToServer(INSTANCE_NAME)
@@ -60,13 +62,13 @@ def main() -> int:
         if not instance_server.listen(INSTANCE_NAME):
             message = f"Não foi possível criar o controle de instância única: {instance_server.errorString()}"
             logging.getLogger("radiostudio").error(message)
-            QMessageBox.critical(None, APP_DISPLAY_NAME, message)
+            QMessageBox.critical(None, "Erro ao iniciar", message)
             return 1
     try:
         window = RadioStudio()
     except Exception as exc:
         logging.getLogger("radiostudio").exception("Falha ao criar a janela principal")
-        QMessageBox.critical(None, APP_DISPLAY_NAME,
+        QMessageBox.critical(None, "Erro ao iniciar",
                              f"O programa não conseguiu iniciar.\n\n{exc}\n\n"
                              f"Consulte o log em: {APP_DIR / 'app.log'}")
         return 1

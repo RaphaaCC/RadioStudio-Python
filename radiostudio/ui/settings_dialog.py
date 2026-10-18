@@ -6,15 +6,21 @@ from ..runtime_safety import guarded
 
 from PySide6.QtMultimedia import QAudioDevice, QMediaDevices
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QLabel,
-    QDoubleSpinBox, QLineEdit, QMessageBox, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout,
+    QLabel, QDoubleSpinBox, QLineEdit, QMessageBox, QPushButton, QSpinBox, QTabWidget,
+    QVBoxLayout, QWidget, QScrollArea,
 )
 
-from ..config import APP_DISPLAY_NAME
+from ..config import DISCORD_APPLICATION_ID
 from ..services.track_metadata import (DEFAULT_STATION_METADATA, PLACEHOLDERS, TrackMetadata,
                             format_broadcast_title, unknown_placeholders)
 from .studio_widgets import WAVEFORM_STYLES
 from ..services.audio_inputs import INPUT_CHANNELS, INPUT_LABELS, audio_device_key
+from ..services.process_priority import PROCESS_PRIORITY_OPTIONS
+from ..services.discord_presence import (
+    ACTIVITY_TYPES, STATUS_DISPLAY_TYPES, unknown_presence_placeholders,
+    validate_public_cover_url, validate_public_radio_url,
+)
 from .icons import apply_app_icon
 
 
@@ -36,17 +42,30 @@ class SettingsDialog(QDialog):
                  parent=None, minimize_to_tray: bool = True,
                  resume_on_startup: bool = True, tray_available: bool = True,
                  player_controls_position: str = "bottom",
-                 waveform_style: str = "bars", auto_start_broadcast: bool = False,
+                 waveform_style: str = "bars", waveform_visualizers_enabled: bool = True,
+                 auto_start_broadcast: bool = False,
                  auto_transitions_enabled: bool = False,
                  fade_in_ms: int = 0, fade_out_ms: int = 0, mix_ms: int = 0,
                  trim_silence: bool = False, silence_threshold_db: float = -42,
                  silence_hold_ms: int = 1200,
                  input_device_keys: dict | None = None,
                  mic_music_level_percent: int = 35, dynamic_mic_duck: bool = False,
-                 speech_music_level_percent: int = 20, speech_threshold_db: float = -38):
+                 speech_music_level_percent: int = 20, speech_threshold_db: float = -38,
+                 discord_client_id: str = "", discord_enabled: bool = False,
+                 discord_share_track: bool = True, discord_public_url: str = "",
+                 discord_use_track_cover: bool = False, discord_cover_url: str = "",
+                 discord_large_image: str = "radiostudio", discord_service=None,
+                 discord_activity_name: str = "RadioStudio Python Sirius",
+                 discord_activity_type: int = 2, discord_status_display_type: int = 0,
+                 discord_details_template: str = "🎵 %title",
+                 discord_state_template: str = "%artist · %station · %status",
+                 discord_large_text: str = "RadioStudio Python Sirius",
+                 discord_button1_label: str = "Ouvir a rádio",
+                 discord_button2_label: str = "", discord_button2_url: str = "",
+                 process_priority: str = "normal"):
         super().__init__(parent)
         apply_app_icon(self)
-        self.setWindowTitle(f"Configurações — {APP_DISPLAY_NAME}")
+        self.setWindowTitle("Configurações")
         self.setMinimumWidth(560)
         layout = QVBoxLayout(self)
         tabs = QTabWidget()
@@ -67,6 +86,25 @@ class SettingsDialog(QDialog):
             "Iniciar transmissão ao abrir se estava ativa ao sair")
         self.auto_start_broadcast.setChecked(auto_start_broadcast)
         general_form.addRow("Transmissão", self.auto_start_broadcast)
+        self.process_priority = QComboBox()
+        for label, value in PROCESS_PRIORITY_OPTIONS:
+            self.process_priority.addItem(label, value)
+        selected_priority = self.process_priority.findData(process_priority)
+        if selected_priority < 0:
+            selected_priority = self.process_priority.findData("normal")
+        self.process_priority.setCurrentIndex(selected_priority)
+        self.process_priority.setToolTip(
+            "Altera a prioridade de agendamento de CPU do processo no Windows.")
+        general_form.addRow("Prioridade do processo", self.process_priority)
+        self.process_priority_warning = QLabel(
+            "⚠️ Tempo real pode deixar o Windows ou outros programas sem resposta. "
+            "Use somente se necessário.")
+        self.process_priority_warning.setWordWrap(True)
+        self.process_priority_warning.setVisible(
+            self.process_priority.currentData() == "realtime")
+        self.process_priority.currentIndexChanged.connect(
+            lambda _index: self.process_priority_warning.setVisible(
+                self.process_priority.currentData() == "realtime"))
         self.player_controls_position = QComboBox()
         self.player_controls_position.addItem("Abaixo da playlist", "bottom")
         self.player_controls_position.addItem("No topo, abaixo de No ar", "top")
@@ -81,13 +119,161 @@ class SettingsDialog(QDialog):
         selected_style = self.waveform_style.findData(waveform_style)
         self.waveform_style.setCurrentIndex(max(0, selected_style))
         general_form.addRow("Visualizador de ondas", self.waveform_style)
+        self.waveform_visualizers_enabled = QCheckBox("Ativar visualizadores de onda")
+        self.waveform_visualizers_enabled.setChecked(waveform_visualizers_enabled)
+        self.waveform_visualizers_enabled.toggled.connect(self.waveform_style.setEnabled)
+        self.waveform_style.setEnabled(waveform_visualizers_enabled)
+        general_form.addRow("Exibição", self.waveform_visualizers_enabled)
         general_layout.addLayout(general_form)
+        general_layout.addWidget(self.process_priority_warning)
+        waveform_warning = QLabel(
+            "⚠️ Visualizadores animados ou dinâmicos podem aumentar o uso de recursos e "
+            "comprometer o desempenho em computadores mais fracos ou sensíveis.")
+        waveform_warning.setWordWrap(True)
+        general_layout.addWidget(waveform_warning)
         if not tray_available:
             note = QLabel("A bandeja do sistema não está disponível nesta sessão.")
             note.setWordWrap(True)
             general_layout.addWidget(note)
         general_layout.addStretch()
         tabs.addTab(general_page, "Geral")
+
+        discord_page = QWidget()
+        discord_page_layout = QVBoxLayout(discord_page)
+        discord_scroll = QScrollArea()
+        discord_scroll.setWidgetResizable(True)
+        discord_content = QWidget()
+        discord_layout = QVBoxLayout(discord_content)
+        discord_intro = QLabel(
+            "Conecte o aplicativo Discord instalado neste computador para mostrar a atividade "
+            "do RadioStudio no seu perfil. O aplicativo já vem configurado; você não precisa "
+            "criar nada no Developer Portal.")
+        discord_intro.setWordWrap(True)
+        discord_layout.addWidget(discord_intro)
+        discord_form = QFormLayout()
+        self.discord_app_id = QLineEdit(DISCORD_APPLICATION_ID)
+        self.discord_app_id.setReadOnly(True)
+        self.discord_app_id.setToolTip("ID oficial do aplicativo RadioStudio Python Sirius")
+        discord_form.addRow("ID do aplicativo", self.discord_app_id)
+        discord_layout.addLayout(discord_form)
+        connection_row = QHBoxLayout()
+        self.discord_verify = QPushButton("🔌 Verificar conexão")
+        self.discord_status = QLabel("Abra o Discord e verifique a conexão.")
+        self.discord_status.setWordWrap(True)
+        connection_row.addWidget(self.discord_verify)
+        connection_row.addWidget(self.discord_status, 1)
+        discord_layout.addLayout(connection_row)
+        self.discord_disable_offline = QPushButton("⏹ Desativar Rich Presence enquanto desconectado")
+        self.discord_disable_offline.clicked.connect(self.disable_discord_while_offline)
+        self.discord_disable_offline.hide()
+        discord_layout.addWidget(self.discord_disable_offline)
+
+        self.discord_options = QGroupBox("Rich Presence")
+        discord_options_layout = QVBoxLayout(self.discord_options)
+        self.discord_enabled = QCheckBox("Ativar Rich Presence do RadioStudio")
+        self.discord_enabled.setChecked(discord_enabled)
+        discord_options_layout.addWidget(self.discord_enabled)
+
+        discord_activity_group = QGroupBox("Atividade")
+        discord_activity_form = QFormLayout(discord_activity_group)
+        self.discord_activity_name = QLineEdit(str(discord_activity_name or "")[:128])
+        self.discord_activity_name.setMaxLength(128)
+        self.discord_activity_name.setPlaceholderText("RadioStudio Python Sirius")
+        discord_activity_form.addRow("Nome exibido", self.discord_activity_name)
+        self.discord_activity_type = QComboBox()
+        for label, value in (("Ouvindo", 2), ("Jogando", 0),
+                             ("Assistindo", 3), ("Competindo", 5)):
+            if value in ACTIVITY_TYPES:
+                self.discord_activity_type.addItem(label, value)
+        selected_type = self.discord_activity_type.findData(discord_activity_type)
+        self.discord_activity_type.setCurrentIndex(max(0, selected_type))
+        discord_activity_form.addRow("Tipo", self.discord_activity_type)
+        self.discord_status_display_type = QComboBox()
+        for label, value in (("Nome do app", 0), ("Estado", 1), ("Detalhes", 2)):
+            if value in STATUS_DISPLAY_TYPES:
+                self.discord_status_display_type.addItem(label, value)
+        selected_display = self.discord_status_display_type.findData(
+            discord_status_display_type)
+        self.discord_status_display_type.setCurrentIndex(max(0, selected_display))
+        discord_activity_form.addRow("Texto em destaque", self.discord_status_display_type)
+        self.discord_share_track = QCheckBox("Compartilhar dados da faixa atual")
+        self.discord_share_track.setChecked(discord_share_track)
+        discord_activity_form.addRow("Privacidade", self.discord_share_track)
+        self.discord_use_track_cover = QCheckBox("Exibir a capa da faixa atual")
+        self.discord_use_track_cover.setChecked(discord_use_track_cover)
+        discord_activity_form.addRow("Imagem", self.discord_use_track_cover)
+        self.discord_cover_url = QLineEdit(str(discord_cover_url or ""))
+        self.discord_cover_url.setPlaceholderText("https://radio.example/cover")
+        self.discord_cover_url.setMaxLength(230)
+        discord_activity_form.addRow("URL pública da capa", self.discord_cover_url)
+        self.discord_use_track_cover.toggled.connect(self.update_discord_cover_url_enabled)
+        self.discord_share_track.toggled.connect(self.update_discord_cover_url_enabled)
+        self.discord_details_template = QLineEdit(str(discord_details_template or "")[:128])
+        self.discord_details_template.setMaxLength(128)
+        self.discord_details_template.setPlaceholderText("🎵 %title")
+        discord_activity_form.addRow("Linha principal", self.discord_details_template)
+        self.discord_state_template = QLineEdit(str(discord_state_template or "")[:128])
+        self.discord_state_template.setMaxLength(128)
+        self.discord_state_template.setPlaceholderText("%artist · %station · %status")
+        discord_activity_form.addRow("Linha secundária", self.discord_state_template)
+        self.discord_large_text = QLineEdit(str(discord_large_text or "")[:128])
+        self.discord_large_text.setMaxLength(128)
+        self.discord_large_text.setPlaceholderText("RadioStudio Python Sirius")
+        discord_activity_form.addRow("Texto ao passar sobre a marca", self.discord_large_text)
+        discord_options_layout.addWidget(discord_activity_group)
+
+        self.discord_buttons_group = QGroupBox("Botões do perfil (até 2)")
+        discord_buttons_form = QFormLayout(self.discord_buttons_group)
+        self.discord_button1_label = QLineEdit(str(discord_button1_label or "")[:32])
+        self.discord_button1_label.setMaxLength(32)
+        self.discord_button1_label.setPlaceholderText("Ouvir a rádio")
+        discord_buttons_form.addRow("Texto do botão 1", self.discord_button1_label)
+        self.discord_public_url = QLineEdit(str(discord_public_url or ""))
+        self.discord_public_url.setPlaceholderText("https://sua-radio.example/live")
+        self.discord_public_url.setMaxLength(2048)
+        discord_buttons_form.addRow("Link do botão 1", self.discord_public_url)
+        self.discord_button2_label = QLineEdit(str(discord_button2_label or "")[:32])
+        self.discord_button2_label.setMaxLength(32)
+        self.discord_button2_label.setPlaceholderText("Site da rádio")
+        discord_buttons_form.addRow("Texto do botão 2", self.discord_button2_label)
+        self.discord_button2_url = QLineEdit(str(discord_button2_url or ""))
+        self.discord_button2_url.setPlaceholderText("https://sua-radio.example")
+        self.discord_button2_url.setMaxLength(2048)
+        discord_buttons_form.addRow("Link do botão 2", self.discord_button2_url)
+        discord_options_layout.addWidget(self.discord_buttons_group)
+        template_help = QLabel(
+            "Use %title, %artist, %album, %station e %status nas linhas. "
+            "Desmarque a opção de privacidade para ocultar os dados da faixa.")
+        template_help.setWordWrap(True)
+        discord_options_layout.addWidget(template_help)
+        discord_privacy_note = QLabel(
+            "Os botões aparecem para outras pessoas, mas o Discord não os mostra no seu próprio "
+            "perfil; teste com outra conta. Somente links públicos HTTP(S) são aceitos. "
+            "A marca do RadioStudio é configurada pelo aplicativo. Para exibir capas, informe "
+            "uma URL pública que sirva a capa atual; o Discord não consegue buscar arquivos "
+            "locais nem endereços da rede privada. Se usar o servidor embutido, habilite a "
+            "opção de capa da transmissão e publique o endpoint /cover em um domínio acessível.")
+        discord_privacy_note.setWordWrap(True)
+        discord_options_layout.addWidget(discord_privacy_note)
+        self.discord_options.hide()
+        discord_layout.addWidget(self.discord_options)
+        discord_layout.addStretch()
+        discord_scroll.setWidget(discord_content)
+        discord_page_layout.addWidget(discord_scroll)
+        tabs.addTab(discord_page, "Discord")
+        self._discord_service = discord_service
+        self._initial_discord_app_id = DISCORD_APPLICATION_ID
+        self.discord_verify.clicked.connect(self.verify_discord_connection)
+        self.discord_enabled.toggled.connect(self.set_discord_controls_enabled)
+        self.discord_enabled.toggled.connect(self.update_discord_offline_action)
+        self.set_discord_controls_enabled(discord_enabled)
+        if discord_service is not None:
+            discord_service.availability_changed.connect(self.set_discord_status)
+            if (discord_service.available
+                    and discord_service.client_id == self._initial_discord_app_id):
+                self.set_discord_status(True, discord_service.status)
+            else:
+                self.set_discord_status(False, discord_service.status)
 
         mix_page = QWidget()
         mix_layout = QVBoxLayout(mix_page)
@@ -278,6 +464,56 @@ class SettingsDialog(QDialog):
                 "url": self.station_url.text().strip(),
                 "title_format": self.title_format.text().strip()}
 
+    def verify_discord_connection(self) -> None:
+        if self._discord_service is None:
+            self.set_discord_status(False, "O serviço de Rich Presence não está disponível.")
+            return
+        self.discord_verify.setEnabled(False)
+        self.discord_verify.setText("Verificando…")
+        self._discord_service.configure(DISCORD_APPLICATION_ID, enabled=False)
+
+    def set_discord_status(self, available: bool, status: str) -> None:
+        same_client = bool(self._discord_service
+                           and self._discord_service.client_id == DISCORD_APPLICATION_ID)
+        verified = bool(available and same_client)
+        self.discord_options.setVisible(verified)
+        self.discord_disable_offline.setVisible(not verified and self.discord_enabled.isChecked())
+        if verified:
+            self.discord_status.setText("✅ " + status)
+        else:
+            self.discord_status.setText(status)
+        checking = not available and status.startswith("Verificando")
+        self.discord_verify.setEnabled(not checking)
+        self.discord_verify.setText("⏳ Verificando…" if checking else "🔌 Verificar conexão")
+
+    def set_discord_controls_enabled(self, enabled: bool) -> None:
+        for widget in (
+                self.discord_share_track, self.discord_use_track_cover,
+                self.discord_activity_name,
+                self.discord_activity_type, self.discord_status_display_type,
+                self.discord_details_template, self.discord_state_template,
+                self.discord_large_text, self.discord_button1_label,
+                self.discord_public_url, self.discord_button2_label,
+                self.discord_button2_url, self.discord_cover_url):
+            widget.setEnabled(enabled)
+        self.update_discord_cover_url_enabled()
+
+    def update_discord_cover_url_enabled(self, _checked: bool | None = None) -> None:
+        can_share_track = (self.discord_enabled.isChecked()
+                           and self.discord_share_track.isChecked())
+        self.discord_use_track_cover.setEnabled(can_share_track)
+        self.discord_cover_url.setEnabled(
+            can_share_track and self.discord_use_track_cover.isChecked())
+
+    def update_discord_offline_action(self, _enabled: bool) -> None:
+        connected = bool(self._discord_service and self._discord_service.available
+                         and self._discord_service.client_id == DISCORD_APPLICATION_ID)
+        self.discord_disable_offline.setVisible(not connected and self.discord_enabled.isChecked())
+
+    def disable_discord_while_offline(self) -> None:
+        self.discord_enabled.setChecked(False)
+        self.discord_status.setText("Rich Presence desativada.")
+
     @guarded
     def update_title_preview(self):
         metadata = self.station_values()
@@ -294,6 +530,31 @@ class SettingsDialog(QDialog):
         if invalid:
             QMessageBox.warning(self, "Placeholders", "Placeholders desconhecidos: " + ", ".join("%" + value for value in invalid))
             return
+        try:
+            validate_public_radio_url(self.discord_public_url.text())
+            validate_public_radio_url(self.discord_button2_url.text())
+            cover_url = validate_public_cover_url(self.discord_cover_url.text())
+            if (self.discord_enabled.isChecked() and self.discord_options.isVisible()
+                    and self.discord_share_track.isChecked()
+                    and self.discord_use_track_cover.isChecked() and not cover_url):
+                raise ValueError("Informe a URL pública que fornece a capa atual.")
+        except ValueError as exc:
+            QMessageBox.warning(self, "Link público", str(exc))
+            return
+        invalid_presence_tokens = sorted(set(
+            unknown_presence_placeholders(self.discord_details_template.text())
+            + unknown_presence_placeholders(self.discord_state_template.text())))
+        if invalid_presence_tokens:
+            QMessageBox.warning(
+                self, "Rich Presence", "Placeholders desconhecidos: "
+                + ", ".join("%" + token for token in invalid_presence_tokens))
+            return
+        if self.discord_enabled.isChecked() and self.discord_options.isVisible():
+            if not self._discord_service or not self._discord_service.available \
+                    or self._discord_service.client_id != DISCORD_APPLICATION_ID:
+                QMessageBox.warning(
+                    self, "Discord", "Verifique a conexão com o Discord antes de ativar a Rich Presence.")
+                return
         super().accept()
 
     def values(self) -> tuple:
@@ -301,10 +562,25 @@ class SettingsDialog(QDialog):
                 self.local_master.isChecked(), self.station_values(),
                 self.minimize_to_tray.isChecked(), self.resume_on_startup.isChecked(),
                 self.player_controls_position.currentData(), self.waveform_style.currentData(),
+                self.waveform_visualizers_enabled.isChecked(),
                 self.auto_start_broadcast.isChecked(), self.auto_transitions.isChecked(),
                 self.fade_in.value(), self.fade_out.value(),
                 self.mix_duration.value(), self.trim_silence.isChecked(),
                 self.silence_threshold.value(), self.silence_hold.value(),
                 {channel: combo.currentData() for channel, combo in self.input_devices.items()},
                 self.mic_music_level.value(), self.dynamic_mic_duck.isChecked(),
-                self.speech_music_level.value(), self.speech_threshold.value())
+                self.speech_music_level.value(), self.speech_threshold.value(),
+                DISCORD_APPLICATION_ID, self.discord_enabled.isChecked(),
+                self.discord_share_track.isChecked(),
+                self.discord_use_track_cover.isChecked(), self.discord_cover_url.text().strip(),
+                self.discord_public_url.text().strip(),
+                "radiostudio", self.discord_activity_name.text().strip(),
+                self.discord_activity_type.currentData(),
+                self.discord_status_display_type.currentData(),
+                self.discord_details_template.text().strip(),
+                self.discord_state_template.text().strip(),
+                self.discord_large_text.text().strip(),
+                self.discord_button1_label.text().strip(),
+                self.discord_button2_label.text().strip(),
+                self.discord_button2_url.text().strip(),
+                self.process_priority.currentData())

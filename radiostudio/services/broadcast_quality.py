@@ -10,6 +10,7 @@ from .broadcast import (
     ENCODED_QUEUE_MAX_MS,
     FRAME_MS,
     BroadcastManager as _BaseBroadcastManager,
+    SILENCE_PCM_FRAME,
 )
 
 # Leave a little headroom before int16 full scale. Crossfades, carts and live
@@ -57,7 +58,13 @@ class BroadcastManager(_BaseBroadcastManager):
             if lateness_ms >= FRAME_MS:
                 self.mixer_overruns += 1
             mixed = self._mix_source_samples()
-            pcm, self.limiter_gain = limit_mixed_samples(mixed, self.limiter_gain)
+            if mixed is None:
+                # A stopped or paused playlist still needs continuous PCM for
+                # active streams, but silence can bypass the Python limiter.
+                pcm = SILENCE_PCM_FRAME
+                self.limiter_gain = 1.0
+            else:
+                pcm, self.limiter_gain = limit_mixed_samples(mixed, self.limiter_gain)
             self._feed_outputs(pcm)
             deadline += FRAME_MS / 1000
             self.stop_event.wait(max(0, deadline - time.monotonic()))

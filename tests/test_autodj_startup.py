@@ -34,6 +34,17 @@ class AutoDJStartupTests(unittest.TestCase):
         AutoDJControllerMixin.start_autodj_if_needed(harness)
         self.assertEqual(harness.fill_calls, 1)
         self.assertEqual(harness.next_calls, 0)
+        self.assertFalse(harness.autodj_startup_pending)
+
+    def test_disabled_autodj_clears_startup_queue_guard(self):
+        harness = _AutoDJHarness()
+        harness.autodj_config["enabled"] = False
+        harness.autodj_startup_pending = True
+
+        AutoDJControllerMixin.start_autodj_if_needed(harness)
+
+        self.assertFalse(harness.autodj_startup_pending)
+        self.assertEqual(harness.fill_calls, 0)
 
 
 if __name__ == "__main__":
