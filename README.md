@@ -1,61 +1,89 @@
-# 🎙️ RadioStudio Python Sirius
+<p align="center">
+  <img src="radiostudio/assets/logo-about-window.png" alt="RadioStudio Python" width="420">
+</p>
 
-**v1.0.1 Stable · Windows**
+<h1 align="center">RadioStudio Python Sirius</h1>
 
-Automação de áudio para rádio com playlist, AutoDJ, entradas ao vivo e transmissão. Projeto independente, com interface em português, inspirado em fluxos descritos no manual do RadioBOSS 7.2.
+<p align="center">
+  Automação de áudio para rádio no Windows<br>
+  <strong>Playlist · AutoDJ · Entradas ao vivo · Transmissão</strong>
+</p>
 
-## Começar
+<p align="center"><a href="LICENSE">Licença MIT</a> · <a href="https://github.com/RaphaaCC/RadioStudio-Python/issues">Reportar um problema</a></p>
 
-No Windows, abra **Iniciar RadioStudio Python.bat**. Na primeira execução, o programa prepara o ambiente e instala as dependências necessárias.
+---
+
+RadioStudio Python Sirius é um aplicativo independente de automação de áudio, com interface em português. Reúne reprodução local, programação musical e transmissão em uma única estação de trabalho. O projeto se inspira em fluxos descritos no manual do RadioBOSS 7.2 e não é um produto oficial do RadioBOSS.
 
 ## Recursos
 
-| Área | O que oferece |
+| Área | Recursos |
 | --- | --- |
-| **Playlist e reprodução** | Adicione arquivos ou pastas, reorganize a fila, salve listas M3U e controle a reprodução local. |
-| **Mixagem** | Configure fades e sobreposição de faixas; monitore o áudio e as capas. |
+| **Playlist e reprodução** | Importe arquivos e pastas, organize a fila, salve listas M3U e controle a reprodução local. |
+| **Mixagem** | Ajuste fades e sobreposição de faixas, acompanhe o áudio no ar e visualize capas. |
 | **AutoDJ** | Indexe bibliotecas, programe blocos e filtros, evite repetições e consulte o histórico. |
-| **Entradas e ao vivo** | Use um microfone, até cinco auxiliares, Cart wall com 25 botões e agendamento de faixas. |
-| **Transmissão** | Transmita pelo servidor embutido, Icecast ou SHOUTcast. Acompanhe o estado das saídas e a contagem de ouvintes quando disponível. |
+| **Entradas e estúdio** | Use microfone, até cinco auxiliares, Cart wall com 25 botões e agendamento de faixas. |
+| **Transmissão** | Use o servidor embutido, Icecast ou SHOUTcast; acompanhe as saídas e os ouvintes quando disponíveis. |
 | **Estação** | Configure metadados, título no ar e Rich Presence do Discord. |
 
-## Configurar transmissão
+## Começar no Windows
 
-- **Servidor embutido:** na aba **📡 Transmissão**, ative o servidor e clique em **Iniciar transmissão**. A aba mostra o endereço; o stream usa `/live.mp3` e o estado fica disponível em `/status.json`.
-- **Icecast:** crie um perfil com servidor, porta, mount e usuário de origem.
-- **SHOUTcast:** escolha **SHOUTcast (fonte v1/v2 compatível)** e informe a porta de origem.
+1. Instale Python 3 para Windows e confirme que o comando `py` está disponível.
+2. Baixe ou clone este repositório.
+3. Abra `Iniciar RadioStudio Python.bat`.
 
-As senhas de transmissão ficam no **Gerenciador de Credenciais do Windows**, não no arquivo de configurações. O encoder transmite em MP3 estéreo a 44,1 kHz; novos perfis usam 192 kbps por padrão.
+O primeiro início cria o ambiente `.venv`, instala as dependências e abre o aplicativo.
 
-## Arquivos e configurações
+### Executar a partir do código
 
-- **Setup:** `%APPDATA%\RadioStudioPython`
-- **Portable:** pasta `RadioStudioPythonData` junto ao executável. Se não puder gravar nela, o programa usa `%APPDATA%\RadioStudioPython`.
+No PowerShell, na pasta do projeto:
 
-Configurações, bibliotecas e histórico ficam no perfil do usuário. Senhas são guardadas separadamente no Gerenciador de Credenciais do Windows.
+```powershell
+py -3 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m radiostudio
+```
 
-## Manual e ajuda
+Para executar os testes automatizados:
 
-Consulte o [Manual do usuário](radiostudio/assets/manual_usuario.pdf) ou abra **Ajuda > Manual do usuário** no programa. O histórico de eventos e o log técnico ficam na pasta de dados do aplicativo.
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+## Transmissão
+
+- **Servidor embutido:** o áudio fica disponível em `/live.mp3`; `/status.json` informa o estado do stream.
+- **Icecast:** configure um perfil com servidor, porta, mount e usuário de origem.
+- **SHOUTcast:** use o modo de fonte v1, compatível com servidores DNAS v2.
+
+A transmissão é codificada em MP3 estéreo a 44,1 kHz. Novos perfis usam 192 kbps por padrão. As senhas ficam no **Gerenciador de Credenciais do Windows**, separadas do arquivo de configurações.
+
+## Dados do usuário
+
+- **Instalação Setup:** `%APPDATA%\RadioStudioPython`.
+- **Edição Portable:** pasta `RadioStudioPythonData` ao lado do executável; se ela não permitir gravação, os dados ficam em `%APPDATA%\RadioStudioPython`.
+
+Configurações, bibliotecas e histórico são mantidos no perfil do aplicativo. O [Manual do usuário](radiostudio/assets/manual_usuario.pdf) também está disponível em **Ajuda > Manual do usuário**.
 
 ## Limitações conhecidas
 
 - A interface está disponível em português.
-- A transmissão codifica em MP3. O protocolo SHOUTcast nativo v2 ainda não é implementado; o RadioStudio usa fonte v1 compatível com servidores DNAS v2.
-- A reprodução de cada formato depende do codec disponível no Windows e no FFmpeg incluído.
-- A conexão com servidores externos depende da configuração do serviço e deve ser validada com o servidor de destino.
+- A transmissão usa MP3; o protocolo nativo SHOUTcast v2 ainda não é implementado.
+- A reprodução de cada formato depende dos codecs disponíveis no Windows e no FFmpeg incluído.
+- Conexões com servidores externos dependem da configuração e do serviço de destino.
 
-## Gerar executáveis para Windows
+## Contribuir
 
-No ambiente do projeto, instale as ferramentas de build e execute o script no PowerShell:
+Abra uma [Issue](https://github.com/RaphaaCC/RadioStudio-Python/issues) para relatar problemas ou discutir uma ideia. Pull requests devem explicar a mudança e como foi validada.
 
-```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements-build.txt
-.\packaging\build_release.ps1
-```
+Raemi Labs e Raphael Cherfem Carlini mantêm o projeto e decidem o roadmap e quais contribuições entram no repositório principal. Enviar uma sugestão ou pull request não garante sua aceitação.
 
-O script gera as versões **Portable** e **Setup**. O Setup preserva as configurações e o histórico ao desinstalar; os executáveis não têm assinatura digital.
+## Licença e créditos
 
----
+O código é distribuído sob a [licença MIT](LICENSE). O copyright do projeto é de **Raemi Labs e Raphael Cherfem Carlini**. A MIT permite usar, modificar, redistribuir e criar forks, inclusive para fins comerciais, desde que as cópias e partes substanciais mantenham o aviso de copyright e o texto da licença.
 
-Para relatar um problema, escreva para [raphael@raemi.xyz](mailto:raphael@raemi.xyz).
+Forks podem seguir em outra direção; as decisões sobre o repositório oficial continuam com seus mantenedores.
+
+## Ajuda
+
+Para suporte, abra uma [Issue no GitHub](https://github.com/RaphaaCC/RadioStudio-Python/issues) ou escreva para [raphael@raemi.xyz](mailto:raphael@raemi.xyz).
