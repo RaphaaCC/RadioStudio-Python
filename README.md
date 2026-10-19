@@ -1,78 +1,61 @@
-# RadioStudio Python Sirius — v1.0.1 Beta
+# 🎙️ RadioStudio Python Sirius
 
-Aplicativo de automação de áudio para Windows, inspirado nos fluxos descritos no manual do RadioBOSS 7.2. Projeto independente, com interface própria.
+**v1.0.1 Stable · Windows**
 
-O menu **Ajuda > Manual do usuário** abre o guia em PDF no visualizador padrão do Windows. O manual cobre a configuração inicial, playlist, AutoDJ, entradas, transições, agendamento, Cart wall, Discord, transmissão e solução de problemas.
+Automação de áudio para rádio com playlist, AutoDJ, entradas ao vivo e transmissão. Projeto independente, com interface em português, inspirado em fluxos descritos no manual do RadioBOSS 7.2.
 
-Esta é a versão de desenvolvimento **v1.0.1 Beta**; a interface está disponível somente em português. Apenas a janela principal exibe o nome **RadioStudio Python Sirius** e a versão no título; as janelas secundárias mostram somente sua função, como **Sobre** e **Configurações**. A janela **Ajuda > Sobre** mostra separadamente o nome do programa e a versão, além da identidade visual, desenvolvedora Raemi Labs, autoria e contato para reportar bugs (`raphael@raemi.xyz`). O ícone baseado em `radiostudio/assets/icon.png` aparece na janela, bandeja, barra de tarefas e diálogos; `icon.ico` contém tamanhos próprios para Windows. `logo-about-window.png` é usado na janela Sobre e `python-transmission.png` está armazenado para uso futuro.
+## Começar
 
-A interface acompanha automaticamente o tema claro ou escuro do Windows, inclusive no explorador e no histórico.
+No Windows, abra **Iniciar RadioStudio Python.bat**. Na primeira execução, o programa prepara o ambiente e instala as dependências necessárias.
 
-## Executar
+## Recursos
 
-Abra `Iniciar RadioStudio Python.bat` com duplo clique. O código está organizado no pacote `radiostudio/` por interface, serviços de áudio e inicialização. Ele cria o ambiente Python e instala as dependências na primeira execução.
-
-### Organização do código
-
-- `radiostudio/app.py` e `radiostudio/config.py`: inicialização e caminhos compartilhados.
-- `radiostudio/ui/`: janela, explorador, fila, reprodução, transmissão, agendador e componentes visuais.
-- `radiostudio/services/`: transmissão/áudio e leitura de metadados.
-- `radiostudio/runtime_safety.py`: isolamento de falhas em ações da interface e log técnico com rotação.
-- `main.py`: ponto de entrada compatível; o arquivo BAT inicia o pacote diretamente.
-- `AGENTS.md`: orientações para agentes de IA sobre arquitetura, segurança dos dados, áudio e verificações.
-
-## Funções desta versão
-
-- Playlist com importação de arquivos e pastas, reordenação ao vivo por arraste (preservando a faixa que está tocando mesmo quando outra linha é movida), remoção de várias faixas com `Ctrl+A` + `Delete`, movimento da seleção com `Ctrl+↑/↓` e salvamento em M3U. A ordem da fila e as próximas faixas do AutoDJ são restauradas ao reabrir o programa. O seletor e as bibliotecas incluem MP2/MP3, WAV, FLAC, Ogg Vorbis/Opus, AAC/M4A/M4B, WMA, AIFF, AC3, APE e MKA/MP4 com áudio. A reprodução usa Qt Multimedia; se ele rejeitar um arquivo, o FFmpeg incluído tenta decodificá-lo para um WAV temporário, removido depois que o player libera a faixa. A lista de extensões não garante suporte a todos os codecs. Título, artista e álbum são lidos das tags dos arquivos; quando o formato ou as tags não são reconhecidos, o nome do arquivo continua disponível como título.
-- Explorador de arquivos na lateral esquerda, em árvore compacta de pastas e áudios: expanda pastas pelo botão `+` ou duplo clique, dê duplo clique em um áudio ou arraste-o para a playlist **Now Playing**. A barra com emojis permite escolher a pasta principal, ver os discos, subir uma pasta, voltar à pasta de músicas, filtrar arquivos pelo nome e mostrar o campo de caminho com 📍. O explorador atualiza os arquivos automaticamente após uma breve pausa e limita a frequência das atualizações enquanto há muitas mudanças seguidas na pasta. O local onde o áudio é solto define a posição na fila. Também é possível selecionar vários arquivos e clicar em **Adicionar seleção**.
-- Abaixo do explorador, o histórico mostra quando uma música começou a tocar, conexões e desconexões das saídas de transmissão e erros. Os eventos são mantidos em `%APPDATA%\RadioStudioPython\events.jsonl`, os 500 mais recentes aparecem na interface e falhas técnicas ficam em `%APPDATA%\RadioStudioPython\app.log` com rotação automática.
-- Janela **Configurações** com seleção da saída principal e do dispositivo de escuta. O botão **Pré-escutar seleção** (ou o menu do botão direito na playlist) usa a saída de escuta sem enviar o áudio à transmissão.
-- Em **Configurações**, a opção **Ouvir o áudio master neste computador** pode ser desativada para transmitir a playlist e o cart wall sem reproduzi-los localmente. A pré-escuta continua independente. O volume do player controla somente a monitoração local e não reduz o nível do programa enviado à transmissão.
-- Aba **🎙 Entradas** com uma entrada de microfone e cinco auxiliares independentes. Escolha os dispositivos em **Configurações > Entradas**; os botões ativam ou removem cada entrada do master e da transmissão. A imagem `radiostudio/assets/microphone.png` é o ícone do botão do microfone. O microfone reduz o nível da música enquanto está ativo e pode aplicar uma redução adicional ao detectar fala, com limite e níveis configuráveis; auxiliares não alteram a música. A escuta local das entradas acompanha a opção do áudio master, enquanto a captura para transmissão permanece ativa.
-- Em **Configurações > Metadados**, defina nome, descrição, gênero e site da estação e personalize o título enviado aos ouvintes. O campo **Título no ar** aceita `%title`, `%artist`, `%album`, `%albumartist`, `%genre`, `%year`, `%track`, `%composer`, `%filename`, `%duration` e `%station`; `%%` insere um `%` literal. A janela mostra uma prévia com a faixa atual. Exemplo: `%station | %artist - %title (%album)`.
-- A barra de menus no topo reúne **Arquivo**, **Reprodução**, **Transmissão**, **Configurações** e **Ajuda**. Em **Configurações > Geral**, você pode escolher se fechar a janela a oculta na bandeja, se a faixa que estava tocando deve ser retomada, se a transmissão ativa deve reiniciar na próxima abertura e a prioridade do processo no Windows (Baixa, Abaixo do normal, Normal, Acima do normal, Alto ou Tempo real). A prioridade escolhida é salva e reaplicada ao abrir. **Tempo real** pode deixar o Windows sem resposta e deve ser usado somente se necessário. Ao sair de verdade, a posição da música e o estado da transmissão são salvos; **Sair** no menu da bandeja ou em **Arquivo** encerra o programa. Se ele já estiver na bandeja, abrir o `.bat` novamente traz a janela existente para frente.
-- Em **Configurações > Fades e Mix**, ajuste o fade in ao iniciar uma faixa, o fade out ao parar/avançar, a sobreposição de faixas no Mix e a detecção de silêncio perto do fim para antecipar a próxima faixa. Fade e Mix são tratados separadamente: configurar fade não cria uma sobreposição automaticamente; o tempo de **Mix** controla a sobreposição. Os fades usam curvas de potência suave e atualização de ganho a 100 Hz. A opção de transições automáticas analisa intro, final e nível de áudio em segundo plano para escolher a duração do Mix e o fade; caudas realmente silenciosas recebem uma entrada curta para a próxima música em vez de um fade excessivamente longo. A faixa atual só é promovida quando o áudio chega ao fim. O corte por silêncio monitora apenas o trecho final (até 15 segundos ou 25% da faixa) e usa limite em dB e tempo mínimo configuráveis.
-- O painel superior mostra data, hora com segundos e a contagem até a próxima hora. A área **No ar** desenha a forma de onda calculada do arquivo em reprodução e acompanha a posição e o tempo restante da faixa; o título e o progresso são reconciliados com o deck ativo, e a troca é recuperada se o backend de áudio omitir o sinal de fim durante um Mix. Em **Configurações > Geral**, escolha entre seis estilos de forma de onda e quatro visores reativos: onda ao vivo, espectro por frequência, espectro espelhado e curva de frequências. Desmarque **Ativar visualizadores de onda** para ocultar os visores e interromper a análise e o processamento visual, reduzindo o uso de recursos; o título e o tempo da faixa continuam sendo atualizados. Abaixo das opções, um aviso informa que visores animados podem afetar o desempenho em computadores mais fracos ou sensíveis. O indicador **NO AR** pisca em vermelho enquanto uma saída de transmissão estiver ativa.
-- Os controles de reprodução ficam abaixo da playlist. Em **Configurações > Geral > Controles do player**, é possível movê-los para o topo; a posição escolhida é salva.
-- Reprodução local, pausa, próxima faixa, volume e barra de posição. O slider de volume mantém largura fixa para continuar preciso quando a área do player é estreita.
-- Aba **🎛️ Cart wall** com 25 botões, atribuição de áudio e reprodução independente.
-- Aba **📅 Agendador** diário ou semanal para inserir e tocar um arquivo em horário definido.
-- Aba **🤖 AutoDJ** com bibliotecas nomeadas e indexadas em segundo plano, programação semanal recorrente por dias e intervalos (inclusive blocos que cruzam a meia-noite), prioridade entre blocos e filtros de gênero, artistas, palavras incluídas/excluídas e ano. Fora dos blocos, o AutoDJ escolhe aleatoriamente entre as faixas elegíveis de todas as bibliotecas habilitadas, favorecendo as menos tocadas; dentro deles, respeita a seleção e os filtros do bloco. Ele completa a fila sem duplicar a mesma faixa já enfileirada.
-- Regras AutoDJ para evitar repetir artista e faixa em janelas de tempo configuráveis. O algoritmo prefere faixas menos recentes, considera também os artistas e faixas que já estão na fila futura e flexibiliza cooldowns com aviso se o acervo não tiver alternativas suficientes, para não interromper a programação. Há também uma opção para remover da Now Playing as linhas anteriores à faixa atual; a música atual e as próximas ficam na fila, e o histórico continua guardado.
-- Histórico de reprodução persistente em `%APPDATA%\RadioStudioPython\music_library.sqlite3`: horário local, caminho e snapshot de título, artista, álbum, gênero, ano e demais metadados de cada faixa que efetivamente começou. O histórico inclui músicas manuais e AutoDJ, alimenta os cooldowns e mantém até 50 mil execuções; também pode ser consultado e limpo na aba **🤖 AutoDJ > Histórico**. As preferências e blocos ficam em `state.json`; os dados indexados das bibliotecas ficam no SQLite.
-- Configurações salvas automaticamente em `%APPDATA%\RadioStudioPython\state.json`.
-- Aba **Discord** nas configurações para Rich Presence. O RadioStudio já usa o aplicativo oficial **RadioStudio Python Sirius** (ID `1561176476290908250`); ninguém precisa criar um aplicativo no Developer Portal. Abra o cliente Discord para computador e clique em **Verificar conexão**. As opções de ativação só aparecem depois que o Discord aceita o registro. Personalize tipo e nome da atividade, qual linha fica em destaque, os modelos das linhas principal/secundária (placeholders `%title`, `%artist`, `%album`, `%station` e `%status`), o texto ao passar sobre a marca e até dois botões com rótulos e links. Para mostrar a capa atual, marque **Exibir a capa da faixa atual** e informe em **URL pública da capa** um endereço acessível pela Internet que sirva a imagem atual; a capa só aparece enquanto **Compartilhar dados da faixa atual** estiver ativado. O Discord não consegue buscar arquivos locais nem endereços privados. Para usar o endpoint `/cover` do servidor embutido, habilite **Disponibilizar capa junto aos metadados do servidor embutido** na aba **Transmissão** e publique `/cover` por um domínio público. A URL da imagem recebe uma chave de atualização para o Discord trocar a capa ao mudar de faixa. A marca visual permanece configurada pelo aplicativo quando não há uma capa disponível. O Discord oculta os botões para quem publicou a atividade: outra pessoa precisa abrir o perfil para vê-los. A atividade também depende das configurações de privacidade do perfil. Se desconectar, o RadioStudio tenta reconectar em segundo plano e informa quando o canal IPC não responde. Os links precisam ser HTTP(S) públicos e não aceitam credenciais, parâmetros nem endereços IP ou domínios locais. Preferências e links ficam em `state.json`; não informe URLs com tokens ou senhas.
-- Aba **📡 Transmissão** com perfis Icecast 2 (HTTP PUT) e SHOUTcast (fonte v1, aceita por servidores DNAS v2 compatíveis), cada um com conexão, codificador MP3, bitrate próprio (192 kbps por padrão em novos perfis) e quatro níveis de complexidade do encoder para ajustar qualidade versus uso de CPU.
-- Reconexão automática em caso de queda, com intervalo progressivo limitado a 30 segundos se o servidor continuar indisponível; o intervalo volta ao inicial depois que a conexão se mantém estável. Falhas em uma saída são isoladas para manter as demais transmitindo; uma fonte de áudio com erro é removida do mixer. O estado de cada saída aparece na aba, com consulta de ouvintes quando o servidor oferece uma API pública de estatísticas.
-- As capas incorporadas nos arquivos são carregadas fora da thread da interface, com cache limitado, e aparecem ao lado do visualizador da faixa no ar e acima dos controles da Now Playing para a faixa selecionada. Clique em uma capa para abri-la em uma janela de visualização. No grupo **Servidor embutido**, **Disponibilizar capa junto aos metadados do servidor embutido** ativa `/cover` e informa `cover_url` e `cover_mime_type` em `/status.json`; o padrão é desativado. Icecast recebe título em texto; a arte experimental do SHOUTcast DNAS v2 depende de um arquivo configurado no próprio servidor e não é enviada pelo RadioStudio.
-- Servidor embutido de escuta em `/live.mp3`, com limite de ouvintes e opção de acesso pela rede local; `/status.json` mostra faixa atual, ouvintes locais e, se ativado e disponível, o endereço da capa.
-- A playlist, Mix, cart wall e entradas são somados para envio. O barramento de transmissão usa limitação de pico com pequeno headroom para evitar a distorção por hard clipping quando duas ou mais fontes se sobrepõem. O título da faixa aparece no servidor embutido via metadados ICY. Servidores externos podem receber o título quando uma senha de administração é configurada no perfil.
-- Os dados da estação são usados no servidor embutido e nas novas conexões externas. Deixe em branco os campos correspondentes de um perfil externo ou o nome do servidor embutido para usar os dados definidos em **Configurações > Metadados**. A troca do formato do título afeta imediatamente a faixa em reprodução; alterações dos dados da estação em servidores externos entram em vigor na próxima conexão.
+| Área | O que oferece |
+| --- | --- |
+| **Playlist e reprodução** | Adicione arquivos ou pastas, reorganize a fila, salve listas M3U e controle a reprodução local. |
+| **Mixagem** | Configure fades e sobreposição de faixas; monitore o áudio e as capas. |
+| **AutoDJ** | Indexe bibliotecas, programe blocos e filtros, evite repetições e consulte o histórico. |
+| **Entradas e ao vivo** | Use um microfone, até cinco auxiliares, Cart wall com 25 botões e agendamento de faixas. |
+| **Transmissão** | Transmita pelo servidor embutido, Icecast ou SHOUTcast. Acompanhe o estado das saídas e a contagem de ouvintes quando disponível. |
+| **Estação** | Configure metadados, título no ar e Rich Presence do Discord. |
 
 ## Configurar transmissão
 
-1. Abra a aba **📡 Transmissão**.
-2. Para o servidor embutido, marque **Ativar servidor de escuta**, escolha a porta e pressione **Iniciar transmissão**. O endereço é exibido na própria aba. A opção de rede local permite conexões de outras máquinas; regras de firewall podem ser necessárias. Para servir a capa atual, marque **Disponibilizar capa junto aos metadados do servidor embutido**; clientes podem consultar `cover_url` em `/status.json` e buscar a imagem em `/cover`.
-   Se a porta escolhida já estiver em uso, o aplicativo tenta as próximas 20 portas e atualiza o endereço mostrado, a configuração salva e o histórico. Use o novo endereço exibido na aba.
-3. Para Icecast, adicione um perfil com servidor, porta, mount, usuário de origem e senha. Marque **Ativo?** para incluir esse perfil ao iniciar a transmissão. Para SHOUTcast, selecione **SHOUTcast (fonte v1/v2 compatível)** e informe a porta de origem oferecida pelo servidor. Servidores DNAS 2.4.7 ou mais novos podem associar a fonte v1 a um Stream ID específico.
-4. A senha de origem e a senha admin opcional são guardadas no Gerenciador de Credenciais do Windows; não aparecem no `state.json`. A porta HTTP/admin só precisa ser preenchida quando difere da porta de origem.
+- **Servidor embutido:** na aba **📡 Transmissão**, ative o servidor e clique em **Iniciar transmissão**. A aba mostra o endereço; o stream usa `/live.mp3` e o estado fica disponível em `/status.json`.
+- **Icecast:** crie um perfil com servidor, porta, mount e usuário de origem.
+- **SHOUTcast:** escolha **SHOUTcast (fonte v1/v2 compatível)** e informe a porta de origem.
 
-## Configurar bibliotecas e AutoDJ
+As senhas de transmissão ficam no **Gerenciador de Credenciais do Windows**, não no arquivo de configurações. O encoder transmite em MP3 estéreo a 44,1 kHz; novos perfis usam 192 kbps por padrão.
 
-1. Na aba **🤖 AutoDJ > Bibliotecas**, adicione uma pasta. O primeiro exame e os exames manuais rodam em segundo plano; habilite as bibliotecas que podem participar da seleção aleatória.
-2. Em **Programação**, crie blocos com dias, intervalo, prioridade e filtros. Horários que passam da meia-noite são aceitos. Uma biblioteca vazia no bloco significa usar todas as bibliotecas habilitadas; filtros sem resultados ficam visíveis no status do AutoDJ e não são substituídos por uma seleção fora do bloco.
-3. Ligue **AutoDJ**. Ele completa a fila até o número de faixas configurado, respeita as janelas de artista/faixa também entre os itens ainda não tocados e registra cada início no histórico. A faixa que já está tocando e os itens futuros já enfileirados não são duplicados. O estado ligado é mantido ao reiniciar o aplicativo.
-4. Se adicionar ou alterar arquivos dentro das pastas, use **Examinar** para atualizar o índice. Consulte ou limpe execuções em **Histórico**.
+## Arquivos e configurações
 
-O formato de transmissão atual é MP3 estéreo, 44,1 kHz, com bitrate configurável (192 kbps para novos perfis) e qualidade do algoritmo do encoder também ajustável por perfil. O encoder da transmissão atualmente sempre codifica em MP3, independentemente do formato do arquivo reproduzido. Para iniciar o stream sem a espera de análise padrão do FFmpeg, o encoder declara explicitamente os parâmetros do PCM conhecido. Para manter compatibilidade com Icecast 2.4.x, o envio usa HTTP PUT com `100-continue` e MP3 bruto, sem enquadramento chunked. Durante conexão ou reconexão, o encoder não acumula áudio antigo; a transmissão retoma com áudio ao vivo quando ele fica pronto. O endpoint local `/status.json` inclui diagnóstico de buffers PCM, underruns, filas e descartes de áudio, atrasos do mixer e tempo de escrita da transmissão. A opção TLS usa certificados válidos do servidor remoto. Para habilitar HTTPS no servidor embutido, coloque `server_cert.pem` e `server_key.pem` em `%APPDATA%\RadioStudioPython` e reinicie o aplicativo.
+- **Setup:** `%APPDATA%\RadioStudioPython`
+- **Portable:** pasta `RadioStudioPythonData` junto ao executável. Se não puder gravar nela, o programa usa `%APPDATA%\RadioStudioPython`.
 
-Esta é uma base funcional. A Rich Presence usa o aplicativo do RadioStudio e depende do cliente Discord para computador em execução e da disponibilidade do canal IPC local. O protocolo de fonte SHOUTcast implementado é o legado v1, inclusive a extensão `password:#SID` aceita por DNAS 2.4.7 ou mais novo; o wire protocol nativo v2 ainda não está implementado. Ainda não há AAC/Opus, proxies, relays de estatísticas, arquivo da transmissão, publicidade, processamento avançado de áudio ou todos os comandos e opções do RadioBOSS. A conexão com servidores externos depende das credenciais e da configuração do serviço e precisa ser confirmada com um servidor real. A disponibilidade simultânea de vários microfones/auxiliares também depende do driver e dos dispositivos instalados no Windows.
+Configurações, bibliotecas e histórico ficam no perfil do usuário. Senhas são guardadas separadamente no Gerenciador de Credenciais do Windows.
 
-## Gerar os executáveis para Windows
+## Manual e ajuda
 
-No ambiente do projeto, instale as ferramentas de compilação uma vez com `\.venv\Scripts\python.exe -m pip install -r requirements-build.txt` e execute `packaging\build_release.ps1` no PowerShell. O script usa `pyside6-deploy` com Nuitka e compila os dois formatos. Na primeira compilação, o Nuitka pode baixar ferramentas auxiliares para o cache local. O script verifica os recursos empacotados em perfis temporários e gera:
+Consulte o [Manual do usuário](radiostudio/assets/manual_usuario.pdf) ou abra **Ajuda > Manual do usuário** no programa. O histórico de eventos e o log técnico ficam na pasta de dados do aplicativo.
 
-- `release\RadioStudio Python Sirius — v1.0.1 Beta — Portable.exe`: executável único, sem janela de terminal. No primeiro uso, cria `RadioStudioPythonData` ao lado do EXE para configurações, bibliotecas e histórico; em uma pasta sem permissão de escrita, usa `%APPDATA%\RadioStudioPython`. Senhas continuam guardadas no Gerenciador de Credenciais do Windows e precisam ser cadastradas novamente em outro computador.
-- `release\RadioStudio Python Sirius — v1.0.1 Beta — Setup.exe`: instalador x64 que registra o nome **RadioStudio Python Sirius** e exibe **v1.0.1 Beta** no campo separado de versão do Windows. Inclui Raemi Labs como publicadora, atalhos opcionais no menu Iniciar e na Área de Trabalho, registro de desinstalação e opção para iniciar o aplicativo ao concluir. A desinstalação remove os arquivos instalados, mas preserva configurações e histórico do usuário.
+## Limitações conhecidas
 
-O aplicativo empacotado não exibe o terminal do Python. A etapa de compilação testa os recursos, FFmpeg, Qt Multimedia e o backend de credenciais em perfil temporário; não inicia uma transmissão nem captura dispositivos de áudio. Os executáveis não são assinados digitalmente; o Windows pode exibir o aviso do SmartScreen até que haja assinatura e reputação do publicador.
+- A interface está disponível em português.
+- A transmissão codifica em MP3. O protocolo SHOUTcast nativo v2 ainda não é implementado; o RadioStudio usa fonte v1 compatível com servidores DNAS v2.
+- A reprodução de cada formato depende do codec disponível no Windows e no FFmpeg incluído.
+- A conexão com servidores externos depende da configuração do serviço e deve ser validada com o servidor de destino.
+
+## Gerar executáveis para Windows
+
+No ambiente do projeto, instale as ferramentas de build e execute o script no PowerShell:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-build.txt
+.\packaging\build_release.ps1
+```
+
+O script gera as versões **Portable** e **Setup**. O Setup preserva as configurações e o histórico ao desinstalar; os executáveis não têm assinatura digital.
+
+---
+
+Para relatar um problema, escreva para [raphael@raemi.xyz](mailto:raphael@raemi.xyz).
