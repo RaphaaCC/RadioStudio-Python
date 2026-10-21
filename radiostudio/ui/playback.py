@@ -859,7 +859,8 @@ class PlaybackMixin:
 
     @guarded
     def update_position(self, value):
-        self.position.setValue(value)
+        if not self.position.isSliderDown():
+            self.position.setValue(value)
         self.position_label.setText(f"{clock_text(value)} / {clock_text(self.player.duration())}")
         self.on_air.set_progress(value, self.player.duration())
         self.maybe_start_mix()

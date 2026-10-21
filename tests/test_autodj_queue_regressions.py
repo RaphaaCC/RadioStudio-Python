@@ -2,7 +2,8 @@ import tempfile
 import unittest
 import json
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from radiostudio.services.autodj import choose_track, program_signature, reserve_track
 from radiostudio.ui.autodj_controller import AutoDJControllerMixin
@@ -31,6 +32,21 @@ class _AutoDJQueueHarness(AutoDJControllerMixin):
 
 
 class AutoDJQueueRegressionTests(unittest.TestCase):
+    def test_track_start_history_reuses_metadata_already_loaded_for_the_display(self):
+        metadata = SimpleNamespace(path="current.mp3", title="Current")
+        library = Mock()
+        player = AutoDJControllerMixin()
+        player.music_library = library
+        player.autodj_config = {"remove_played_from_queue": False}
+        player._display_sync_path = "current.mp3"
+        player._display_sync_metadata = metadata
+
+        with patch("radiostudio.ui.autodj_controller.read_track_metadata") as read_metadata:
+            AutoDJControllerMixin.record_track_started(player, "current.mp3")
+
+        read_metadata.assert_not_called()
+        library.record_play.assert_called_once_with(metadata)
+
     def test_saved_autodj_signature_round_trips_with_legacy_library_id_types(self):
         signature = (program_signature(None), (1, "2"))
         restored = _tuple_tree(json.loads(json.dumps(signature)))

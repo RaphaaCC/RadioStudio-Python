@@ -2,6 +2,7 @@ import array
 import math
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from radiostudio.services.transition_analysis import (
@@ -13,6 +14,7 @@ from radiostudio.services.transition_analysis import (
     bounded_transition_duration_ms,
     equal_power_gains,
     plan_automatic_transition,
+    TransitionAnalyzer,
 )
 
 
@@ -82,6 +84,20 @@ class TransitionAnalysisTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             missing = Path(folder) / "missing.mp3"
             self.assertIsNone(analyze_track_transition(str(missing)))
+
+    def test_analyzer_retains_worker_until_completion_and_deduplicates_requests(self):
+        with patch("radiostudio.services.transition_analysis.QThreadPool.globalInstance") as pool:
+            analyzer = TransitionAnalyzer()
+            analyzer.request("track.mp3")
+            task = analyzer._jobs["track.mp3"]
+
+            analyzer.request("track.mp3")
+
+            self.assertIs(analyzer._jobs["track.mp3"], task)
+            self.assertEqual(pool.return_value.start.call_count, 1)
+            analyzer._complete("track.mp3", None)
+            self.assertNotIn("track.mp3", analyzer._jobs)
+            self.assertNotIn("track.mp3", analyzer._pending)
 
 
 if __name__ == "__main__":

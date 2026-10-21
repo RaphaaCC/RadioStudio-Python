@@ -180,7 +180,7 @@ class ProfileDialog(QDialog):
         layout.addWidget(buttons)
 
     @guarded
-    def update_protocol_fields(self):
+    def update_protocol_fields(self, _index: int = -1):
         icecast = self.kind.currentData() == "icecast"
         self.protocol_help.setText(
             "Icecast 2: envio HTTP PUT para um mount. Informe o usuário de origem e o mount."
@@ -403,7 +403,7 @@ class BroadcastPanel(QWidget):
             self.main_window.save_state()
 
     @guarded
-    def edit_profile(self):
+    def edit_profile(self, _index=None):
         row = self.table.currentRow()
         if row < 0:
             return

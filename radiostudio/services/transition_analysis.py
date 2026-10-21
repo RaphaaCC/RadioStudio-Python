@@ -260,6 +260,10 @@ class TransitionAnalyzer(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._pending: set[str] = set()
+        # Keep the Python wrappers (and their signal objects) alive until the
+        # queued completion slot runs. Fast worker completion can otherwise
+        # race wrapper collection after QThreadPool.start() returns.
+        self._jobs: dict[str, _AnalysisTask] = {}
 
     def request(self, path: str) -> None:
         if not path or path in self._pending:
@@ -267,9 +271,11 @@ class TransitionAnalyzer(QObject):
         self._pending.add(path)
         task = _AnalysisTask(path)
         task.signals.finished.connect(self._complete)
+        self._jobs[path] = task
         QThreadPool.globalInstance().start(task)
 
     @Slot(str, object)
     def _complete(self, path: str, analysis) -> None:
         self._pending.discard(path)
+        self._jobs.pop(path, None)
         self.result_ready.emit(path, analysis)

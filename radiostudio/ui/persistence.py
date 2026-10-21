@@ -4,6 +4,7 @@ import logging
 import math
 import os
 import re
+import shutil
 import uuid
 
 from ._shared import *
@@ -100,6 +101,8 @@ class PersistenceMixin:
     @guarded
     def load_state(self):
         if not STATE_FILE.exists():
+            logging.getLogger("radiostudio").info(
+                "Arquivo de configurações não encontrado; usando valores padrão: %s", STATE_FILE)
             return
         try:
             state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
@@ -172,6 +175,23 @@ class PersistenceMixin:
             if not priority_applied:
                 logging.getLogger("radiostudio").warning(
                     "Não foi possível restaurar a prioridade do processo: %s", priority_error)
+            backup_directory = state.get("backup_directory", "")
+            self.backup_directory = (backup_directory[:2048]
+                                     if isinstance(backup_directory, str) else "")
+            saved_periodic_backup = state.get("backup_periodic_enabled", False)
+            self.backup_periodic_enabled = (saved_periodic_backup
+                                            if isinstance(saved_periodic_backup, bool) else False)
+            valid_backup_intervals = {3600, 21600, 43200, 86400, 604800}
+            self.backup_interval_seconds = bounded_int(
+                state.get("backup_interval_seconds", 86400), 86400, 1, 604800)
+            if self.backup_interval_seconds not in valid_backup_intervals:
+                self.backup_interval_seconds = 86400
+            self.backup_retention = bounded_int(
+                state.get("backup_retention", 10), 10, 1, 500)
+            self.backup_last_run = bounded_float(
+                state.get("backup_last_run", 0), 0.0, 0.0, time.time() + 31536000)
+            if self.backup_last_run > time.time():
+                self.backup_last_run = 0.0
             self.broadcast_was_running = bool(state.get("broadcast_was_running", False))
             # The application ID belongs to RadioStudio; users do not need to
             # create or configure their own Discord Developer application.
@@ -302,10 +322,29 @@ class PersistenceMixin:
                         "Não foi possível restaurar a assinatura da fila do AutoDJ")
             self.autodj_panel.refresh_history()
         except (OSError, ValueError, TypeError, KeyError) as exc:
-            QMessageBox.warning(self, "Configuração", f"Não foi possível carregar os dados salvos:\n{exc}")
+            logging.getLogger("radiostudio").error(
+                "Não foi possível carregar dados salvos de %s: %s", STATE_FILE, exc)
+            recovery_path = None
+            try:
+                if STATE_FILE.is_file():
+                    recovery_path = STATE_FILE.with_name(
+                        f"{STATE_FILE.stem}.recovery-{uuid.uuid4().hex[:8]}{STATE_FILE.suffix}")
+                    shutil.copy2(STATE_FILE, recovery_path)
+            except OSError:
+                logging.getLogger("radiostudio").exception(
+                    "Não foi possível preservar uma cópia dos dados salvos inválidos")
+                recovery_path = None
+            message = f"Não foi possível carregar os dados salvos:\n{exc}"
+            if recovery_path is not None:
+                logging.getLogger("radiostudio").warning(
+                    "Cópia recuperável das configurações preservada em %s", recovery_path)
+                message += f"\n\nUma cópia foi preservada em:\n{recovery_path}"
+            QMessageBox.warning(self, "Configuração", message)
 
     @guarded
     def save_state(self):
+        if getattr(self, "_skip_state_save", False):
+            return
         if not self.is_quitting:
             self.capture_playback()
         APP_DIR.mkdir(parents=True, exist_ok=True)
@@ -326,6 +365,11 @@ class PersistenceMixin:
                 "resume_on_startup": self.resume_on_startup,
                 "auto_start_broadcast": self.auto_start_broadcast,
                 "process_priority": normalize_process_priority(self.process_priority),
+                "backup_directory": self.backup_directory,
+                "backup_periodic_enabled": self.backup_periodic_enabled,
+                "backup_interval_seconds": self.backup_interval_seconds,
+                "backup_retention": self.backup_retention,
+                "backup_last_run": self.backup_last_run,
                 "broadcast_was_running": self.broadcast_was_running,
                 "discord_client_id": DISCORD_APPLICATION_ID,
                 "discord_enabled": self.discord_enabled,

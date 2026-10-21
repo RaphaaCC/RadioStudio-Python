@@ -2,6 +2,7 @@ import tempfile
 import unittest
 import sqlite3
 import errno
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -165,6 +166,47 @@ class AutoDJTests(unittest.TestCase):
             self.assertEqual((indexed, skipped), (0, 0))
             self.assertGreater(errors, 0)
             self.assertEqual(len(store.tracks_for_libraries([library_id])), 1)
+
+    def test_scan_write_failure_does_not_delete_existing_index_rows(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder) / "music"
+            root.mkdir()
+            old_track = root / "Old.mp3"
+            old_track.write_bytes(b"old audio")
+            store = MusicLibrary(Path(folder) / "library.sqlite3")
+            library_id = store.add_library("Music", str(root))
+            self.assertEqual(store.scan_library(library_id), (1, 0, 0))
+
+            old_track.unlink()
+            new_track = root / "New.mp3"
+            new_track.write_bytes(b"new audio")
+            original_connect = store._connect
+
+            class FailingBatch:
+                def __init__(self, database):
+                    self.database = database
+
+                def __getattr__(self, name):
+                    return getattr(self.database, name)
+
+                def executemany(self, sql, values):
+                    if sql.startswith("INSERT INTO tracks"):
+                        raise sqlite3.OperationalError("simulated write failure")
+                    return self.database.executemany(sql, values)
+
+            @contextmanager
+            def failing_connect():
+                with original_connect() as database:
+                    yield FailingBatch(database)
+
+            with patch.object(store, "_connect", side_effect=failing_connect):
+                indexed, skipped, errors = store.scan_library(library_id)
+
+            self.assertEqual((indexed, skipped), (0, 0))
+            self.assertGreater(errors, 0)
+            self.assertEqual(
+                [track["path"] for track in store.tracks_for_libraries([library_id])],
+                [str(old_track.resolve())])
 
 
 if __name__ == "__main__":

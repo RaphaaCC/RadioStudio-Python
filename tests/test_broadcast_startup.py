@@ -1,9 +1,11 @@
 import json
 import math
+import queue
 import struct
 import threading
 import time
 import unittest
+from http.server import BaseHTTPRequestHandler
 from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import urlopen
@@ -56,6 +58,87 @@ class _BlockingSocket(_FragmentedSocket):
 
 
 class BroadcastStartupTests(unittest.TestCase):
+    def test_stalled_listener_socket_is_closed_when_its_queue_overflows(self):
+        server = LocalStreamServer("127.0.0.1", 0, 2, "Test")
+        server.start()
+        response = None
+        try:
+            port = server.server.server_address[1]
+            response = urlopen(f"http://127.0.0.1:{port}/live.mp3", timeout=2)
+            deadline = time.monotonic() + 2
+            while not server.client_sockets and time.monotonic() < deadline:
+                time.sleep(0.01)
+            with server.lock:
+                client = next(iter(server.clients))
+                connection = server.client_sockets[client]
+
+            # Simulate a listener whose bounded queue can no longer accept audio.
+            with patch.object(client, "put_nowait", side_effect=queue.Full):
+                server.publish(b"audio")
+
+            self.assertEqual(server.listeners, 0)
+            self.assertEqual(server.client_sockets, {})
+            deadline = time.monotonic() + 2
+            while connection.fileno() != -1 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(connection.fileno(), -1)
+        finally:
+            if response:
+                response.close()
+            server.stop()
+
+    def test_stopping_embedded_server_closes_active_listener_sockets(self):
+        server = LocalStreamServer("127.0.0.1", 0, 2, "Test")
+        server.start()
+        response = None
+        try:
+            port = server.server.server_address[1]
+            response = urlopen(f"http://127.0.0.1:{port}/live.mp3", timeout=2)
+            deadline = time.monotonic() + 2
+            while not server.client_sockets and time.monotonic() < deadline:
+                time.sleep(0.01)
+            with server.lock:
+                connection = next(iter(server.client_sockets.values()))
+
+            server.stop()
+
+            self.assertEqual(server.listeners, 0)
+            self.assertEqual(server.client_sockets, {})
+            deadline = time.monotonic() + 2
+            while connection.fileno() != -1 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(connection.fileno(), -1)
+        finally:
+            if response:
+                response.close()
+            server.stop()
+
+    def test_listener_limit_response_does_not_hold_audio_client_lock(self):
+        server = LocalStreamServer("127.0.0.1", 0, 1, "Test")
+        server.start()
+        first_listener = None
+        try:
+            url = f"http://127.0.0.1:{server.server.server_address[1]}/live.mp3"
+            first_listener = urlopen(url, timeout=2)
+            lock_states = []
+            send_error = BaseHTTPRequestHandler.send_error
+
+            def inspect_lock(handler, code, *args, **kwargs):
+                if code == 503:
+                    lock_states.append(server.lock.locked())
+                return send_error(handler, code, *args, **kwargs)
+
+            with patch.object(BaseHTTPRequestHandler, "send_error", new=inspect_lock):
+                with self.assertRaises(HTTPError) as error:
+                    urlopen(url, timeout=2)
+            self.assertEqual(error.exception.code, 503)
+            error.exception.close()
+            self.assertEqual(lock_states, [False])
+        finally:
+            if first_listener:
+                first_listener.close()
+            server.stop()
+
     def test_embedded_stream_delivers_live_mp3_before_source_ends(self):
         server = LocalStreamServer("127.0.0.1", 0, 2, "Synthetic")
         server.start()

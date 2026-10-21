@@ -6,9 +6,9 @@ from ..runtime_safety import guarded
 
 from PySide6.QtMultimedia import QAudioDevice, QMediaDevices
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout,
-    QLabel, QDoubleSpinBox, QLineEdit, QMessageBox, QPushButton, QSpinBox, QTabWidget,
-    QVBoxLayout, QWidget, QScrollArea,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGroupBox,
+    QHBoxLayout, QLabel, QDoubleSpinBox, QLineEdit, QMessageBox, QPushButton, QSpinBox,
+    QTabWidget, QVBoxLayout, QWidget, QScrollArea,
 )
 
 from ..config import DISCORD_APPLICATION_ID
@@ -62,7 +62,11 @@ class SettingsDialog(QDialog):
                  discord_large_text: str = "RadioStudio Python Sirius",
                  discord_button1_label: str = "Ouvir a rádio",
                  discord_button2_label: str = "", discord_button2_url: str = "",
-                 process_priority: str = "normal"):
+                 process_priority: str = "normal", backup_directory: str = "",
+                 backup_periodic_enabled: bool = False,
+                 backup_interval_seconds: int = 86400, backup_retention: int = 10,
+                 backup_create_callback=None, backup_import_callback=None,
+                 database_repair_callback=None):
         super().__init__(parent)
         apply_app_icon(self)
         self.setWindowTitle("Configurações")
@@ -137,6 +141,82 @@ class SettingsDialog(QDialog):
             general_layout.addWidget(note)
         general_layout.addStretch()
         tabs.addTab(general_page, "Geral")
+
+        backup_page = QWidget()
+        backup_layout = QVBoxLayout(backup_page)
+        backup_form = QFormLayout()
+        backup_folder_row = QHBoxLayout()
+        self.backup_directory = QLineEdit(str(backup_directory or ""))
+        self.backup_directory.setPlaceholderText("Selecione a pasta para os backups")
+        self.backup_directory.setToolTip("Os arquivos de backup serão salvos nesta pasta.")
+        self.backup_browse = QPushButton("Selecionar…")
+        self.backup_browse.clicked.connect(self.choose_backup_directory)
+        backup_folder_row.addWidget(self.backup_directory, 1)
+        backup_folder_row.addWidget(self.backup_browse)
+        backup_form.addRow("Pasta de destino", backup_folder_row)
+        self.backup_periodic_enabled = QCheckBox("Criar backups automaticamente")
+        self.backup_periodic_enabled.setChecked(bool(backup_periodic_enabled))
+        backup_form.addRow("Backups periódicos", self.backup_periodic_enabled)
+        self.backup_interval = QComboBox()
+        for label, seconds in (("A cada 1 hora", 3600), ("A cada 6 horas", 21600),
+                               ("A cada 12 horas", 43200), ("A cada 24 horas", 86400),
+                               ("A cada 7 dias", 604800)):
+            self.backup_interval.addItem(label, seconds)
+        try:
+            selected_interval = self.backup_interval.findData(int(backup_interval_seconds))
+        except (TypeError, ValueError, OverflowError):
+            selected_interval = -1
+        self.backup_interval.setCurrentIndex(selected_interval if selected_interval >= 0 else 3)
+        self.backup_interval.setEnabled(self.backup_periodic_enabled.isChecked())
+        self.backup_periodic_enabled.toggled.connect(self.backup_interval.setEnabled)
+        backup_form.addRow("Frequência", self.backup_interval)
+        self.backup_retention = QSpinBox()
+        self.backup_retention.setRange(1, 500)
+        self.backup_retention.setSuffix(" backups")
+        try:
+            retention_value = int(backup_retention)
+        except (TypeError, ValueError, OverflowError):
+            retention_value = 10
+        self.backup_retention.setValue(max(1, min(500, retention_value)))
+        self.backup_retention.setToolTip(
+            "Após cada backup, os mais antigos criados pelo RadioStudio serão removidos para manter este limite.")
+        backup_form.addRow("Manter os últimos", self.backup_retention)
+        backup_layout.addLayout(backup_form)
+        backup_note = QLabel(
+            "O backup inclui configurações, playlist, programação, índice e histórico das bibliotecas; "
+            "os arquivos de música não são copiados. "
+            "As senhas do Gerenciador de Credenciais do Windows não são exportadas. "
+            "Backups periódicos são executados enquanto o RadioStudio está aberto.")
+        backup_note.setWordWrap(True)
+        backup_layout.addWidget(backup_note)
+        backup_actions = QHBoxLayout()
+        self.backup_now = QPushButton("💾 Criar backup agora")
+        self.backup_import = QPushButton("📥 Importar configurações")
+        backup_actions.addWidget(self.backup_now)
+        backup_actions.addWidget(self.backup_import)
+        backup_actions.addStretch()
+        backup_layout.addLayout(backup_actions)
+        self.database_repair = QPushButton("🛠 Verificar e reparar banco de dados")
+        self.database_repair.setToolTip(
+            "Verifica o índice das bibliotecas e o histórico. Se estiver corrompido, tenta restaurar "
+            "um backup ou recuperar os registros legíveis e reinicia o programa.")
+        backup_layout.addWidget(self.database_repair)
+        initial_backup_status = (
+            "Backups periódicos ativados. A frequência começa a contar após salvar as configurações."
+            if backup_periodic_enabled else
+            "Backups automáticos ficam desativados até você ativá-los.")
+        self.backup_status = QLabel(initial_backup_status)
+        self.backup_status.setObjectName("backup_status")
+        self.backup_status.setWordWrap(True)
+        backup_layout.addWidget(self.backup_status)
+        backup_layout.addStretch()
+        self._backup_create_callback = backup_create_callback
+        self._backup_import_callback = backup_import_callback
+        self._database_repair_callback = database_repair_callback
+        self.backup_now.clicked.connect(self.create_manual_backup)
+        self.backup_import.clicked.connect(self.import_settings_backup)
+        self.database_repair.clicked.connect(self.request_database_repair)
+        tabs.addTab(backup_page, "Backup e recuperação")
 
         discord_page = QWidget()
         discord_page_layout = QVBoxLayout(discord_page)
@@ -464,6 +544,40 @@ class SettingsDialog(QDialog):
                 "url": self.station_url.text().strip(),
                 "title_format": self.title_format.text().strip()}
 
+    def choose_backup_directory(self) -> None:
+        folder = QFileDialog.getExistingDirectory(
+            self, "Pasta para backups", self.backup_directory.text().strip())
+        if folder:
+            self.backup_directory.setText(folder)
+
+    @guarded
+    def create_manual_backup(self) -> None:
+        folder = self.backup_directory.text().strip()
+        if not folder:
+            QMessageBox.warning(self, "Backup", "Selecione uma pasta de destino primeiro.")
+            return
+        if self._backup_create_callback is None:
+            QMessageBox.warning(self, "Backup", "O serviço de backup não está disponível.")
+            return
+        self.backup_status.setText("Criando backup em segundo plano…")
+        if not self._backup_create_callback(folder, self.backup_retention.value()):
+            self.backup_status.setText("Já existe uma operação de backup em andamento.")
+
+    @guarded
+    def import_settings_backup(self) -> None:
+        backup_file, _ = QFileDialog.getOpenFileName(
+            self, "Importar configurações", self.backup_directory.text().strip(),
+            "Backups do RadioStudio (*.zip);;Todos os arquivos (*)")
+        if backup_file and self._backup_import_callback is not None:
+            self._backup_import_callback(backup_file)
+
+    @guarded
+    def request_database_repair(self) -> None:
+        if self._database_repair_callback is None:
+            QMessageBox.warning(self, "Banco de dados", "O serviço de recuperação não está disponível.")
+            return
+        self._database_repair_callback()
+
     def verify_discord_connection(self) -> None:
         if self._discord_service is None:
             self.set_discord_status(False, "O serviço de Rich Presence não está disponível.")
@@ -515,7 +629,7 @@ class SettingsDialog(QDialog):
         self.discord_status.setText("Rich Presence desativada.")
 
     @guarded
-    def update_title_preview(self):
+    def update_title_preview(self, _text: str = ""):
         metadata = self.station_values()
         result = format_broadcast_title(metadata["title_format"], self.preview_track, metadata)
         self.title_preview.setText("Prévia: " + result)
@@ -529,6 +643,11 @@ class SettingsDialog(QDialog):
         invalid = unknown_placeholders(metadata["title_format"])
         if invalid:
             QMessageBox.warning(self, "Placeholders", "Placeholders desconhecidos: " + ", ".join("%" + value for value in invalid))
+            return
+        if (self.backup_periodic_enabled.isChecked()
+                and not self.backup_directory.text().strip()):
+            QMessageBox.warning(
+                self, "Backups periódicos", "Selecione a pasta de destino dos backups.")
             return
         try:
             validate_public_radio_url(self.discord_public_url.text())
@@ -583,4 +702,6 @@ class SettingsDialog(QDialog):
                 self.discord_button1_label.text().strip(),
                 self.discord_button2_label.text().strip(),
                 self.discord_button2_url.text().strip(),
-                self.process_priority.currentData())
+                self.process_priority.currentData(), self.backup_directory.text().strip(),
+                self.backup_periodic_enabled.isChecked(), self.backup_interval.currentData(),
+                self.backup_retention.value())

@@ -34,7 +34,7 @@ ROOT = Path(__file__).resolve().parents[1]
 ASSET_DIR = ROOT / "radiostudio" / "assets"
 LOGO_FILE = ASSET_DIR / "logo-about-window.png"
 OUTPUT_FILE = ASSET_DIR / "manual_usuario.pdf"
-VERSION = "v1.0.1 Beta"
+VERSION = "v1.0.1 Stable"
 PAGE_WIDTH, PAGE_HEIGHT = A4
 
 NAVY = colors.HexColor("#071A3D")
@@ -205,7 +205,6 @@ class CoverPage(Flowable):
         canvas.setFillColor(colors.HexColor("#B9CBE0"))
         canvas.setFont("Vera", 8.5)
         canvas.drawString(30 * mm, 32 * mm, "Edição em português • Raemi Labs • 2026")
-        canvas.drawRightString(PAGE_WIDTH - 30 * mm, 32 * mm, "Manual da versão Beta")
         canvas.restoreState()
 
 
@@ -270,7 +269,7 @@ class ManualDocTemplate(BaseDocTemplate):
 
 SECTIONS = [
     ("1. Comece por aqui", [
-        ("p", "O RadioStudio Python Sirius reúne uma fila de reprodução, automação de programação musical, entradas de áudio e saídas de transmissão. Este manual descreve a versão v1.0.1 Beta, cuja interface está disponível somente em português."),
+        ("p", "O RadioStudio Python Sirius reúne uma fila de reprodução, automação de programação musical, entradas de áudio e saídas de transmissão. Este manual descreve a versão v1.0.1 Stable, cuja interface está disponível somente em português."),
         ("callout", ("A reprodução local e o envio à transmissão compartilham o áudio do programa. O controle de volume local ajusta a monitoração no computador e não reduz o sinal transmitido. A pré-escuta usa uma saída separada.", False)),
         ("h2", "Uma rotina simples"),
         ("steps", [
@@ -696,12 +695,12 @@ SECTIONS = [
             "Se ocorrer um erro, anote o horário, a ação e a faixa; consulte app.log sem compartilhar senhas ou dados privados.",
         ]),
     ]),
-    ("24. Limites desta versão Beta", [
+    ("24. Limites desta versão", [
         ("p", "Esta edição está disponível somente em português. O envio externo usa codificação MP3; AAC/Opus, proxy e relay de estatísticas, gravação de transmissão e processamento avançado de áudio ainda não estão disponíveis."),
         ("p", "O protocolo de fonte SHOUTcast implementado é o legado v1, com suporte à identificação de Stream ID compatível com DNAS 2.4.7 ou mais recente; o protocolo nativo v2 não está implementado. A disponibilidade simultânea de entradas também depende dos drivers e dispositivos do Windows."),
         ("p", "As listas de formatos indicam extensões aceitas pelo seletor, mas o suporte real depende do codec disponível. A Rich Presence depende do Discord instalado, em execução e acessível pelo canal IPC local."),
         ("p", "Relate bugs usando o contato mostrado em Ajuda > Sobre. Inclua versão, horário, ação realizada e mensagens do Histórico. Não envie senhas, tokens ou cópias do seu banco de dados público."),
-        ("callout", ("Este guia acompanha a versão v1.0.1 Beta. Os nomes de opções e recursos podem mudar em versões futuras.", False)),
+        ("callout", (f"Este guia acompanha a versão {VERSION}. Os nomes de opções e recursos podem mudar em versões futuras.", False)),
     ]),
 ]
 

@@ -212,7 +212,12 @@ class AutoDJControllerMixin:
         if not path:
             return
         try:
-            metadata = read_track_metadata(path)
+            path = str(path)
+            metadata = None
+            if path == getattr(self, "_display_sync_path", ""):
+                metadata = getattr(self, "_display_sync_metadata", None)
+            if metadata is None:
+                metadata = read_track_metadata(path)
             self.music_library.record_play(metadata)
             if hasattr(self, "autodj_panel"):
                 self.autodj_panel.schedule_history_refresh()

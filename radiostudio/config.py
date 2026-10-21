@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 
 APP_NAME = "RadioStudio Python Sirius"
-APP_VERSION = "v1.0.1 Beta"
+APP_VERSION = "v1.0.1 Stable"
 APP_CODENAME = "Sirius"
 APP_DISPLAY_NAME = f"{APP_NAME} — {APP_VERSION}"
 ASSET_DIR = Path(__file__).resolve().parent / "assets"
@@ -37,6 +37,7 @@ def _app_data_dir() -> Path:
 
 APP_DIR = _app_data_dir()
 STATE_FILE = APP_DIR / "state.json"
+MUSIC_LIBRARY_FILE = APP_DIR / "music_library.sqlite3"
 AUDIO_EXTENSIONS = {
     ".mp2", ".mp3", ".wav", ".flac", ".ogg", ".opus", ".m4a", ".m4b",
     ".mp4", ".aac", ".wma", ".aif", ".aiff", ".ac3", ".ape", ".mka",

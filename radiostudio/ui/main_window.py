@@ -34,8 +34,8 @@ from ..services.audio_decode_fallback import AudioDecodeFallback
 from ..services.discord_presence import DiscordPresenceService, make_activity
 from ..services.audio_paths import audio_path_key, same_audio_path
 from ..services.cover_art import CoverArtLoader
-from ..config import (ABOUT_LOGO_FILE, APP_NAME, APP_VERSION, DISCORD_APPLICATION_ID,
-                      USER_MANUAL_FILE)
+from ..config import (ABOUT_LOGO_FILE, APP_DIR, APP_NAME, APP_VERSION,
+                      DISCORD_APPLICATION_ID, MUSIC_LIBRARY_FILE, USER_MANUAL_FILE)
 from .icons import app_icon, apply_app_icon
 from .studio_widgets import CoverArtLabel
 
@@ -50,6 +50,15 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         self.tracks = []
         self.track_sources = []
         self.events = []
+        self.backup_directory = ""
+        self.backup_periodic_enabled = False
+        self.backup_interval_seconds = 86400
+        self.backup_retention = 10
+        self.backup_last_run = 0.0
+        self._backup_retry_after = 0.0
+        self._backup_worker = None
+        self._active_settings_dialog = None
+        self._skip_state_save = False
         self.music_library_fallback = False
         try:
             self.music_library = MusicLibrary()
@@ -243,6 +252,10 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         self.scheduler_timer = QTimer(self)
         self.scheduler_timer.timeout.connect(self.check_schedule)
         self.scheduler_timer.start(1000)
+        self.backup_timer = QTimer(self)
+        self.backup_timer.setInterval(60_000)
+        self.backup_timer.timeout.connect(self.check_scheduled_backup)
+        self.backup_timer.start()
         QTimer.singleShot(1200, self.start_autodj_if_needed)
 
     def build_ui(self):

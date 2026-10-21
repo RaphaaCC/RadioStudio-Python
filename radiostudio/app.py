@@ -5,11 +5,12 @@ from __future__ import annotations
 import logging
 import sys
 import ctypes
+import time
 from PySide6.QtGui import QIcon
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from .config import APP_DIR, APP_ICON_FILE, APP_NAME, INSTANCE_NAME
+from .config import APP_DIR, APP_ICON_FILE, APP_NAME, INSTANCE_NAME, STATE_FILE
 from .runtime_safety import configure_exception_logging, guarded
 from .ui.main_window import RadioStudio
 from .ui.icons import apply_app_icon
@@ -36,6 +37,7 @@ def set_windows_app_id() -> None:
 
 def main() -> int:
     configure_exception_logging(APP_DIR)
+    logging.getLogger("radiostudio").info("Arquivo de configurações: %s", STATE_FILE)
     set_windows_app_id()
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
@@ -44,6 +46,28 @@ def main() -> int:
     # caption. The main window already sets its full name and version itself.
     app.setApplicationDisplayName("")
     app.setWindowIcon(QIcon(str(APP_ICON_FILE)))
+    restart_wait_flag = "--radiostudio-restart-wait"
+    if restart_wait_flag in sys.argv[1:]:
+        # A restarted copy waits for the previous process to release the
+        # single-instance socket before trying to become the new instance.
+        sys.argv.remove(restart_wait_flag)
+        deadline = time.monotonic() + 30
+        consecutive_disconnected = 0
+        while time.monotonic() < deadline and consecutive_disconnected < 3:
+            probe = QLocalSocket()
+            probe.connectToServer(INSTANCE_NAME)
+            if probe.waitForConnected(150):
+                probe.disconnectFromServer()
+                consecutive_disconnected = 0
+            else:
+                probe.abort()
+                consecutive_disconnected += 1
+            if consecutive_disconnected < 3:
+                time.sleep(0.2)
+        if consecutive_disconnected < 3:
+            logging.getLogger("radiostudio").error(
+                "O RadioStudio anterior não liberou o controle de instância a tempo")
+            return 1
     existing = QLocalSocket(app)
     existing.connectToServer(INSTANCE_NAME)
     if existing.waitForConnected(300):

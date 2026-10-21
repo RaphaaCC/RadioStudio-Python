@@ -1,5 +1,6 @@
 """Playlist operations for the main window."""
 
+import logging
 import os
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal, Slot
@@ -59,8 +60,13 @@ class _FolderScanWorker(QRunnable):
                             metadata_by_path[path_text] = read_track_metadata(path_text)
                     except OSError:
                         errors += 1
-        except OSError:
+        except Exception:
+            # Always send a completion result so the interface releases its
+            # busy flag even when a filesystem backend or path parser raises an
+            # unexpected exception. Keep already discovered audio available.
             errors += 1
+            logging.getLogger("radiostudio").exception(
+                "Falha inesperada ao examinar a pasta %s", self.folder)
         paths.sort(key=str.casefold)
         self.signals.finished.emit(self.folder, (paths, metadata_by_path, errors))
 

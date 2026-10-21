@@ -231,6 +231,9 @@ class LocalStreamServer:
         self.title = ""
         self.tls = False
         self.clients: set[queue.Queue] = set()
+        # Keep each streaming socket reachable so a listener that stops
+        # reading cannot leave a request-handler thread blocked forever.
+        self.client_sockets: dict[queue.Queue, socket.socket] = {}
         self.lock = threading.Lock()
         self.server = None
         self.thread = None
@@ -300,10 +303,15 @@ class LocalStreamServer:
                     return
                 client = queue.Queue(maxsize=80)
                 with owner.lock:
-                    if len(owner.clients) >= owner.max_listeners:
-                        self.send_error(503, "Limite de ouvintes atingido")
-                        return
-                    owner.clients.add(client)
+                    listener_limit_reached = len(owner.clients) >= owner.max_listeners
+                    if not listener_limit_reached:
+                        owner.clients.add(client)
+                        owner.client_sockets[client] = self.connection
+                if listener_limit_reached:
+                    # Writing an HTTP error can block on a slow client. Do not
+                    # hold the mixer-facing client lock during socket I/O.
+                    self.send_error(503, "Limite de ouvintes atingido")
+                    return
                 try:
                     self.send_response(200)
                     self.send_header("Content-Type", "audio/mpeg")
@@ -342,8 +350,7 @@ class LocalStreamServer:
                 except (BrokenPipeError, ConnectionResetError, OSError):
                     pass
                 finally:
-                    with owner.lock:
-                        owner.clients.discard(client)
+                    owner._remove_listener(client)
 
         try:
             self.server = ExclusiveHTTPServer((self.host, self.port), Handler)
@@ -391,16 +398,48 @@ class LocalStreamServer:
                 self.cover_art_mime_type = ""
 
     def publish(self, data: bytes):
+        stalled_sockets = []
         with self.lock:
             for client in tuple(self.clients):
                 try:
                     client.put_nowait(data)
                 except queue.Full:
                     self.clients.discard(client)
+                    connection = self.client_sockets.pop(client, None)
+                    if connection is not None:
+                        stalled_sockets.append(connection)
+        for connection in stalled_sockets:
+            self._close_listener_socket(connection)
+            logging.getLogger("radiostudio").warning(
+                "Ouvinte local desconectado por não acompanhar o fluxo de áudio")
+
+    def _remove_listener(self, client: queue.Queue):
+        with self.lock:
+            self.clients.discard(client)
+            return self.client_sockets.pop(client, None)
+
+    @staticmethod
+    def _close_listener_socket(connection: socket.socket):
+        # shutdown() interrupts a blocked write; close() also releases the
+        # descriptor promptly if the handler is waiting on the socket.
+        try:
+            connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            connection.close()
+        except OSError:
+            pass
 
     def stop(self):
         server, self.server = self.server, None
         thread, self.thread = self.thread, None
+        with self.lock:
+            active_sockets = tuple(self.client_sockets.values())
+            self.client_sockets.clear()
+            self.clients.clear()
+        for connection in active_sockets:
+            self._close_listener_socket(connection)
         if server:
             if thread and thread.is_alive():
                 server.shutdown()

@@ -269,6 +269,20 @@ class PlaylistRegressionTests(unittest.TestCase):
         self.assertEqual(metadata_by_path[str(root / "b.mp3")].title, "b")
         self.assertEqual(errors, 0)
 
+    def test_folder_scan_worker_emits_completion_after_unexpected_walk_failure(self):
+        results = []
+        worker = _FolderScanWorker("unavailable-folder")
+        worker.signals.finished.connect(lambda path, result: results.append((path, result)))
+
+        with self.assertLogs("radiostudio", level="ERROR"):
+            with patch("radiostudio.ui.playlist.os.walk",
+                       side_effect=RuntimeError("simulated filesystem failure")):
+                worker.run()
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0][0], "unavailable-folder")
+        self.assertEqual(results[0][1], ([], {}, 1))
+
     def test_drag_validation_does_not_access_filesystem_until_drop(self):
         class Url:
             def isLocalFile(self):

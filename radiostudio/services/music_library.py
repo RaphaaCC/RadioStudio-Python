@@ -9,7 +9,7 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-from ..config import APP_DIR, AUDIO_EXTENSIONS
+from ..config import AUDIO_EXTENSIONS, MUSIC_LIBRARY_FILE
 from .audio_paths import audio_path_key
 from .track_metadata import read_track_metadata
 
@@ -18,7 +18,7 @@ class MusicLibrary:
     """Stores indexed tracks and a metadata snapshot for every played track."""
 
     def __init__(self, database: Path | None = None):
-        self.database = Path(database or (APP_DIR / "music_library.sqlite3"))
+        self.database = Path(database or MUSIC_LIBRARY_FILE)
         # Trigger one retention check on the first play after startup, then batch
         # checks to keep per-track writes inexpensive.
         self._plays_since_prune = 100
@@ -173,7 +173,7 @@ class MusicLibrary:
             duration=excluded.duration"""
 
         def flush_batch():
-            nonlocal errors, indexed
+            nonlocal errors, indexed, complete
             if not batch:
                 return
             try:
@@ -182,6 +182,11 @@ class MusicLibrary:
                 indexed += len(batch)
             except sqlite3.Error:
                 errors += len(batch)
+                # A partial write means this traversal is not authoritative.
+                # Keep stale rows until a later scan can index every discovered
+                # track, instead of deleting valid entries after a lock or I/O
+                # error interrupted one batch.
+                complete = False
             batch.clear()
 
         for directory in [root, *folders]:
