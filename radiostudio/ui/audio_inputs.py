@@ -90,5 +90,4 @@ class AudioInputsControllerMixin:
             self.music_duck_gain += difference * (1 - math.exp(-0.02 / time_constant))
         self.apply_main_volume()
         self.mix_audio.setVolume(self.master_volume * self.mix_gain * self.music_duck_gain)
-        for _player, output, _buffer, _source in self.cart_players:
-            output.setVolume(0.8 * self.music_duck_gain)
+        self.apply_cart_local_volume()

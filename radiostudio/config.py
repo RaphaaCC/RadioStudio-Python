@@ -16,6 +16,8 @@ APP_ICON_FILE = ASSET_DIR / "icon.ico"
 ABOUT_LOGO_FILE = ASSET_DIR / "logo-about-window.png"
 USER_MANUAL_FILE = ASSET_DIR / "manual_usuario.pdf"
 LICENSE_FILE = ASSET_DIR / "LICENSE.txt"
+PROJECT_REPOSITORY_URL = "https://github.com/RaphaaCC/RadioStudio-Python"
+PROJECT_ISSUES_URL = f"{PROJECT_REPOSITORY_URL}/issues"
 DISCORD_APPLICATION_ID = "1561176476290908250"
 
 def _app_data_dir() -> Path:

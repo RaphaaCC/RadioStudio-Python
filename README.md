@@ -80,9 +80,9 @@ Raemi Labs e Raphael Cherfem Carlini mantêm o projeto e decidem o roadmap e qua
 
 ## Licença e créditos
 
-O código é distribuído sob a [licença MIT](LICENSE). O copyright do projeto é de **Raemi Labs e Raphael Cherfem Carlini**. A MIT permite usar, modificar, redistribuir e criar forks, inclusive para fins comerciais, desde que as cópias e partes substanciais mantenham o aviso de copyright e o texto da licença.
+O código é distribuído sob a [licença PolyForm Noncommercial 1.0.0](LICENSE). O copyright do projeto é de **Raemi Labs e Raphael Cherfem Carlini**. A licença permite usos não comerciais, incluindo uso pessoal, pesquisa, estudo, entretenimento privado e projetos de organizações não comerciais, desde que os termos da licença e o aviso de copyright sejam mantidos.
 
-Forks podem seguir em outra direção; as decisões sobre o repositório oficial continuam com seus mantenedores.
+A licença não concede direitos de uso ou distribuição comercial. Para solicitar uma licença comercial separada, entre em contato com [raphael@raemi.xyz](mailto:raphael@raemi.xyz). Forks e trabalhos derivados também devem respeitar os termos da PolyForm; as decisões sobre o repositório oficial continuam com seus mantenedores.
 
 ## Ajuda
 

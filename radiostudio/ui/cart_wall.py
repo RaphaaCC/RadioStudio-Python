@@ -4,14 +4,20 @@ from ._shared import *
 from ..runtime_safety import guarded
 from ..services.audio_paths import same_audio_path
 
+CART_GAIN = 0.8
+
 
 class CartWallMixin:
     @guarded
-    def cart_menu(self, index):
+    def cart_menu(self, index, position=None):
+        if not 0 <= index < min(len(self.carts), len(self.cart_buttons)):
+            return
         menu = QMenu(self)
         assign = menu.addAction("Atribuir áudio...")
         clear = menu.addAction("Limpar")
-        chosen = menu.exec(self.cart_buttons[index].mapToGlobal(self.cart_buttons[index].rect().bottomLeft()))
+        button = self.cart_buttons[index]
+        anchor = position if position is not None else button.rect().bottomLeft()
+        chosen = menu.exec(button.mapToGlobal(anchor))
         if chosen == assign:
             path, _ = QFileDialog.getOpenFileName(self, "Áudio do cart", "", AUDIO_FILTER)
             if path:
@@ -20,6 +26,17 @@ class CartWallMixin:
             self.carts[index] = ""
         self.refresh_carts()
         self.save_state()
+
+    def cart_local_volume(self):
+        master = max(0.0, min(1.0, float(getattr(self, "master_volume", 1.0))))
+        duck = max(0.0, min(1.0, float(getattr(self, "music_duck_gain", 1.0))))
+        return master * CART_GAIN * duck
+
+    @guarded
+    def apply_cart_local_volume(self):
+        volume = self.cart_local_volume()
+        for _player, output, _buffer_output, _source_id in tuple(self.cart_players):
+            output.setVolume(volume)
 
     @guarded
     def refresh_carts(self):
@@ -35,6 +52,8 @@ class CartWallMixin:
 
     @guarded
     def play_cart(self, index):
+        if not 0 <= index < min(len(self.carts), len(self.cart_buttons)):
+            return
         path = self.carts[index]
         if not path:
             self.cart_menu(index)
@@ -44,14 +63,14 @@ class CartWallMixin:
             return
         player = QMediaPlayer(self)
         output = QAudioOutput(self)
-        output.setVolume(0.8 * self.music_duck_gain)
+        output.setVolume(self.cart_local_volume())
         output.setDevice(resolve_output_device(self.main_device_key))
         output.setMuted(not self.local_master_enabled)
         player.setAudioOutput(output)
         buffer_output = QAudioBufferOutput(self.broadcast_format, self)
         source_id = f"cart-{id(player)}"
         buffer_output.audioBufferReceived.connect(
-            lambda buffer, key=source_id: self.forward_buffer(key, buffer, 0.8))
+            lambda buffer, key=source_id: self.forward_buffer(key, buffer, CART_GAIN))
         player.setAudioBufferOutput(buffer_output)
         self.cart_players.append((player, output, buffer_output, source_id))
         player.mediaStatusChanged.connect(

@@ -39,7 +39,7 @@ from ..services.audio_paths import audio_path_key, same_audio_path
 from ..services.cover_art import CoverArtLoader
 from ..config import (ABOUT_LOGO_FILE, APP_DIR, APP_NAME, APP_VERSION,
                       DISCORD_APPLICATION_ID, LICENSE_FILE, MUSIC_LIBRARY_FILE,
-                      USER_MANUAL_FILE)
+                      PROJECT_ISSUES_URL, PROJECT_REPOSITORY_URL, USER_MANUAL_FILE)
 from .icons import app_icon, apply_app_icon
 from .studio_widgets import CoverArtLabel
 
@@ -472,7 +472,8 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
             button.setMinimumHeight(68)
             button.clicked.connect(lambda checked=False, i=index: self.play_cart(i))
             button.setContextMenuPolicy(Qt.CustomContextMenu)
-            button.customContextMenuRequested.connect(lambda point, i=index: self.cart_menu(i))
+            button.customContextMenuRequested.connect(
+                lambda point, i=index: self.cart_menu(i, point))
             cart_layout.addWidget(button, index // 5, index % 5)
             self.cart_buttons.append(button)
         tabs.addTab(cart_page, "🎛️ Cart wall")
@@ -689,26 +690,62 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
             logo.setStyleSheet("background-color: #f3f6fa; border-radius: 6px; padding: 6px;")
             layout.addWidget(logo)
 
-        details = QLabel(
+        heading = QLabel(
             f"<b>{APP_NAME}</b><br>"
-            f"Versão: {APP_VERSION}<br><br>"
-            "Automação de áudio, playlist e transmissão.<br><br>"
-            "Desenvolvido por Raemi Labs<br>"
-            "Autor: Raphael Cherfem Carlini<br>"
-            "Apoiado e testado por:<br>"
-            "- Gabriel Sousa<br>"
-            "Contato: <a href=\"mailto:contato@gabastt.shop\">contato@gabastt.shop</a><br>"
-            "© 2026 Raemi Labs<br><br>"
-            "<b>Projeto:</b> source-available; o código-fonte está disponível, "
-            "mas este projeto não é open source. Uso comercial exige licença separada.<br><br>"
-            "<b>Idioma:</b> disponível somente em Português nesta versão.<br>"
-            "<b>Relatar bugs:</b> "
-            "<a href=\"mailto:raphael@raemi.xyz\">raphael@raemi.xyz</a>"
+            f"<span style=\"color: #a8a8a8\">{APP_VERSION} · Automação de áudio para rádio</span>"
         )
-        details.setTextFormat(Qt.TextFormat.RichText)
-        details.setOpenExternalLinks(True)
-        details.setWordWrap(True)
-        layout.addWidget(details)
+        heading.setTextFormat(Qt.TextFormat.RichText)
+        layout.addWidget(heading)
+
+        credits = QLabel(
+            "Desenvolvido por <b>Raemi Labs</b><br>"
+            "Autor: Raphael Cherfem Carlini<br>"
+            "Apoiado e testado por Gabriel Sousa · "
+            "<a href=\"mailto:contato@gabastt.shop\">contato@gabastt.shop</a><br>"
+            "© 2026 Raemi Labs"
+        )
+        credits.setTextFormat(Qt.TextFormat.RichText)
+        credits.setOpenExternalLinks(True)
+        credits.setWordWrap(True)
+        layout.addWidget(credits)
+
+        project_row = QHBoxLayout()
+        project_info = QToolButton(dialog)
+        project_info.setAutoRaise(True)
+        project_info.setIcon(dialog.style().standardIcon(
+            QStyle.StandardPixmap.SP_MessageBoxInformation))
+        project_info.setToolTip("Sobre o tipo de licença e o uso do código-fonte")
+        project_info.setAccessibleName("Informações sobre a licença do projeto")
+        project_info.clicked.connect(
+            lambda _checked=False: QMessageBox.information(
+                dialog, "Projeto source-available",
+                "O código-fonte está disponível para consulta e para os usos permitidos "
+                "pela licença. O RadioStudio não é open source; uso comercial exige "
+                "autorização e uma licença separada. Consulte o botão Licença para ver "
+                "os termos completos.",
+            )
+        )
+        project_row.addWidget(project_info, 0, Qt.AlignmentFlag.AlignTop)
+
+        project_details = QLabel(
+            "<b>Source-available:</b> código-fonte disponível sob licença própria; "
+            "este projeto não é open source. Uso comercial exige licença separada."
+        )
+        project_details.setTextFormat(Qt.TextFormat.RichText)
+        project_details.setWordWrap(True)
+        project_row.addWidget(project_details, 1)
+        layout.addLayout(project_row)
+
+        links = QLabel(
+            "<b>Idioma:</b> disponível somente em Português nesta versão.<br>"
+            f"<b>GitHub:</b> <a href=\"{PROJECT_REPOSITORY_URL}\">Repositório do projeto</a> · "
+            f"<a href=\"{PROJECT_ISSUES_URL}\">relatar um problema</a><br>"
+            "<b>Contato:</b> <a href=\"mailto:raphael@raemi.xyz\">raphael@raemi.xyz</a>"
+        )
+        links.setTextFormat(Qt.TextFormat.RichText)
+        links.setOpenExternalLinks(True)
+        links.setWordWrap(True)
+        layout.addWidget(links)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.rejected.connect(dialog.accept)

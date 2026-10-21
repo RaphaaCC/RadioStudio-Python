@@ -604,6 +604,7 @@ class PlaybackMixin:
         self.apply_main_volume()
         self.mix_audio.setVolume(
             self.master_volume * self.mix_gain * getattr(self, "music_duck_gain", 1.0))
+        self.apply_cart_local_volume()
 
     @guarded
     def apply_main_volume(self):
