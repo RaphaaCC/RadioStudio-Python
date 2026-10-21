@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 
 APP_NAME = "RadioStudio Python Sirius"
-APP_VERSION = "v1.0.1 Stable"
+APP_VERSION = "v1.0.2 Beta"
 APP_CODENAME = "Sirius"
 APP_DISPLAY_NAME = f"{APP_NAME} — {APP_VERSION}"
 ASSET_DIR = Path(__file__).resolve().parent / "assets"

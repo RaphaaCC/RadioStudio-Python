@@ -17,9 +17,9 @@ $releaseDir = Join-Path $root "release"
 $buildDir = Join-Path $root "build"
 $configDir = Join-Path $buildDir "release-config"
 $distDir = Join-Path $buildDir "dist"
-$portableName = "RadioStudio Python Sirius — v1.0.1 Stable — Portable.exe"
-$portableBuildTitle = "RadioStudio Python Sirius - v1.0.1 Stable - Portable"
-$setupName = "RadioStudio Python Sirius — v1.0.1 Stable — Setup.exe"
+$portableName = "RadioStudio Python Sirius — v1.0.2 Beta — Portable.exe"
+$portableBuildTitle = "RadioStudio Python Sirius - v1.0.2 Beta - Portable"
+$setupName = "RadioStudio Python Sirius — v1.0.2 Beta — Setup.exe"
 $assetsDir = Join-Path $root "radiostudio\assets"
 $iconFile = Join-Path $assetsDir "icon.ico"
 $portableEntry = Join-Path $root "packaging\portable_entry.py"
@@ -52,8 +52,8 @@ function Write-DeployConfig(
         "--windows-console-mode=disable",
         '--company-name="Raemi Labs"',
         '--product-name="RadioStudio Python Sirius"',
-        "--file-version=1.0.1.0",
-        "--product-version=1.0.1.0",
+        "--file-version=1.0.2.0",
+        "--product-version=1.0.2.0",
         '--file-description="RadioStudio Python Sirius"',
         '--copyright="Copyright (C) 2026 Raemi Labs"',
         "--include-data-dir=`"$assetsDir=radiostudio/assets`"",
