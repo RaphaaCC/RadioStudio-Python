@@ -8,7 +8,10 @@ from pathlib import Path
 
 from PySide6.QtCore import QFileSystemWatcher, Qt, QTimer
 from PySide6.QtGui import QDesktopServices, QPixmap
-from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QLabel, QVBoxLayout)
+from PySide6.QtWidgets import (
+    QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton,
+    QVBoxLayout,
+)
 
 from ._shared import *
 from .event_dialog import EventDialog
@@ -35,7 +38,8 @@ from ..services.discord_presence import DiscordPresenceService, make_activity
 from ..services.audio_paths import audio_path_key, same_audio_path
 from ..services.cover_art import CoverArtLoader
 from ..config import (ABOUT_LOGO_FILE, APP_DIR, APP_NAME, APP_VERSION,
-                      DISCORD_APPLICATION_ID, MUSIC_LIBRARY_FILE, USER_MANUAL_FILE)
+                      DISCORD_APPLICATION_ID, LICENSE_FILE, MUSIC_LIBRARY_FILE,
+                      USER_MANUAL_FILE)
 from .icons import app_icon, apply_app_icon
 from .studio_widgets import CoverArtLabel
 
@@ -695,6 +699,8 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
             "- Gabriel Sousa<br>"
             "Contato: <a href=\"mailto:contato@gabastt.shop\">contato@gabastt.shop</a><br>"
             "© 2026 Raemi Labs<br><br>"
+            "<b>Projeto:</b> source-available; o código-fonte está disponível, "
+            "mas este projeto não é open source. Uso comercial exige licença separada.<br><br>"
             "<b>Idioma:</b> disponível somente em Português nesta versão.<br>"
             "<b>Relatar bugs:</b> "
             "<a href=\"mailto:raphael@raemi.xyz\">raphael@raemi.xyz</a>"
@@ -707,8 +713,49 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.rejected.connect(dialog.accept)
         buttons.accepted.connect(dialog.accept)
-        layout.addWidget(buttons)
+        button_row = QHBoxLayout()
+        license_button = QPushButton("Licença", dialog)
+        license_button.clicked.connect(lambda _checked=False: self.show_license(dialog))
+        button_row.addWidget(license_button)
+        button_row.addStretch(1)
+        button_row.addWidget(buttons)
+        layout.addLayout(button_row)
         dialog.exec()
+
+    @guarded
+    def show_license(self, parent=None):
+        license_text = None
+        source_license = Path(__file__).resolve().parents[2] / "LICENSE"
+        for path in (LICENSE_FILE, source_license):
+            try:
+                license_text = path.read_text(encoding="utf-8")
+                break
+            except (OSError, UnicodeError):
+                continue
+
+        owner = parent or self
+        if license_text is None:
+            QMessageBox.warning(
+                owner, "Licença indisponível",
+                "Não foi possível carregar o arquivo de licença do programa.",
+            )
+            return
+
+        license_dialog = QDialog(owner)
+        license_dialog.setWindowTitle("Licença")
+        apply_app_icon(license_dialog)
+        license_dialog.setMinimumSize(720, 520)
+        layout = QVBoxLayout(license_dialog)
+        text_view = QPlainTextEdit(license_dialog)
+        text_view.setReadOnly(True)
+        text_view.setPlainText(license_text)
+        layout.addWidget(text_view)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, license_dialog)
+        buttons.rejected.connect(license_dialog.accept)
+        buttons.accepted.connect(license_dialog.accept)
+        layout.addWidget(buttons)
+        license_dialog.exec()
 
     @guarded
     def sync_discord_presence(self):

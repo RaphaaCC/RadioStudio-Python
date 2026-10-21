@@ -19,6 +19,7 @@ def run() -> int:
             name for name in (
                 "icon.ico", "icon.png", "logo-about-window.png",
                 "microphone.png", "python-transmission.png", "manual_usuario.pdf",
+                "LICENSE.txt",
             ) if not (ASSET_DIR / name).is_file()
         ]
         if missing_assets:

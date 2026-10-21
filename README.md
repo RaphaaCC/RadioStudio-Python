@@ -13,7 +13,7 @@
 
 ---
 
-RadioStudio Python Sirius é um aplicativo independente de automação de áudio, com interface em português. Reúne reprodução local, programação musical e transmissão em uma única estação de trabalho. O projeto se inspira em fluxos descritos no manual do RadioBOSS 7.2 e não é um produto oficial do RadioBOSS.
+RadioStudio Python Sirius é um aplicativo independente de automação de áudio, com interface em português. Reúne reprodução local, programação musical e transmissão em uma única estação de trabalho.
 
 ## Recursos
 

@@ -57,6 +57,7 @@ function Write-DeployConfig(
         '--file-description="RadioStudio Python Sirius"',
         '--copyright="Copyright (C) 2026 Raemi Labs"',
         "--include-data-dir=`"$assetsDir=radiostudio/assets`"",
+        "--include-data-files=`"$root\LICENSE=radiostudio/assets/LICENSE.txt`"",
         "--include-package-data=keyring",
         "--include-package=pypresence",
         "--include-module=keyring.backends.Windows",
