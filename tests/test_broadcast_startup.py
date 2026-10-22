@@ -12,8 +12,10 @@ from urllib.request import urlopen
 
 from radiostudio.services.broadcast import (
     FRAME_MS, PCM_BYTES_PER_FRAME, SAMPLE_RATE, BroadcastManager, EncoderOutput,
-    LocalStreamServer, RemoteSink,
+    LocalStreamServer, PortInUseError, RemoteSink,
 )
+from radiostudio.i18n import translate
+from radiostudio.ui.broadcast_panel import start_broadcast_with_local_fallback
 
 
 class _FragmentedSocket:
@@ -57,7 +59,57 @@ class _BlockingSocket(_FragmentedSocket):
         self.release_send.set()
 
 
+class _HandshakeBlockingSocket(_FragmentedSocket):
+    def __init__(self):
+        super().__init__(b"")
+        self.recv_started = threading.Event()
+        self.closed_event = threading.Event()
+
+    def recv(self, _size):
+        self.recv_started.set()
+        self.closed_event.wait(2)
+        return b""
+
+    def close(self):
+        super().close()
+        self.closed_event.set()
+
+    def shutdown(self, how):
+        super().shutdown(how)
+        self.closed_event.set()
+
+
 class BroadcastStartupTests(unittest.TestCase):
+    def test_busy_embedded_ports_do_not_block_configured_remote_outputs(self):
+        class BroadcastHarness:
+            def __init__(self):
+                self.start_attempts = []
+                self.startup_errors = {}
+                self.outputs = []
+
+            def start(self, profiles, local):
+                self.start_attempts.append(dict(local))
+                if local["enabled"]:
+                    raise PortInUseError("Porta em uso")
+                self.outputs = list(profiles)
+
+        broadcast = BroadcastHarness()
+        local = {"enabled": True, "port": 8090}
+        profiles = [{"id": "remote", "enabled": True}]
+
+        effective_local = start_broadcast_with_local_fallback(
+            broadcast, profiles, local)
+
+        self.assertEqual(len(broadcast.start_attempts), 22)
+        self.assertEqual(broadcast.start_attempts[0]["port"], 8090)
+        self.assertEqual(broadcast.start_attempts[20]["port"], 8110)
+        self.assertFalse(effective_local["enabled"])
+        self.assertEqual(broadcast.outputs, profiles)
+        self.assertEqual(
+            broadcast.startup_errors["local"],
+            translate("Nenhuma porta livre entre {first_port} e {last_port}").format(
+                first_port=8090, last_port=8110))
+
     def test_stalled_listener_socket_is_closed_when_its_queue_overflows(self):
         server = LocalStreamServer("127.0.0.1", 0, 2, "Test")
         server.start()
@@ -291,6 +343,70 @@ class BroadcastStartupTests(unittest.TestCase):
             sink.connect()
         self.assertIs(sink.sock, sock)
         sink.close()
+
+    def test_cancel_connect_interrupts_a_pending_icecast_handshake(self):
+        sock = _HandshakeBlockingSocket()
+        sink = RemoteSink({"kind": "icecast", "host": "localhost", "port": 8000,
+                           "mount": "/live.mp3"}, "secret")
+        failures = []
+
+        def connect():
+            try:
+                sink.connect()
+            except Exception as exc:
+                failures.append(exc)
+
+        with patch("radiostudio.services.broadcast.socket.create_connection",
+                   return_value=sock):
+            thread = threading.Thread(target=connect)
+            thread.start()
+            self.assertTrue(sock.recv_started.wait(1))
+
+            self.assertTrue(sink.cancel_connect())
+            thread.join(timeout=1)
+
+        self.assertFalse(thread.is_alive())
+        self.assertTrue(failures)
+        self.assertIsNone(sink.sock)
+        self.assertTrue(sock.closed)
+        self.assertFalse(sink.cancel_connect())
+
+    def test_icecast_handshake_timeout_reports_a_clear_error(self):
+        class TimeoutSocket(_FragmentedSocket):
+            def recv(self, _size):
+                raise TimeoutError("timed out")
+
+        sock = TimeoutSocket(b"")
+        sink = RemoteSink({"kind": "icecast", "host": "localhost", "port": 8000,
+                           "mount": "/live.mp3"}, "secret")
+        with patch("radiostudio.services.broadcast.socket.create_connection",
+                   return_value=sock):
+            with self.assertRaisesRegex(TimeoutError, "Tempo esgotado ao conectar"):
+                sink.connect()
+        self.assertTrue(sock.closed)
+
+    def test_retry_keeps_last_connection_error_visible_while_reconnecting(self):
+        profile = {"id": "profile-1", "kind": "icecast", "host": "localhost", "port": 8000,
+                   "mount": "/live.mp3"}
+        sink = RemoteSink(profile, "secret")
+        output = EncoderOutput("Icecast", 128, sink)
+        output.stop_event = threading.Event()
+        states = []
+        output.status_callback = lambda: states.append((output.status, output.error))
+        attempts = 0
+
+        def fail_then_stop():
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise OSError("connection refused")
+            output.stop_event.set()
+
+        with patch.object(RemoteSink, "connect", side_effect=fail_then_stop), \
+                patch("radiostudio.services.broadcast.reconnect_delay", return_value=0):
+            output._run()
+
+        self.assertGreaterEqual(states.count(("Reconectando", "connection refused")), 2)
 
     def test_abort_remote_icecast_does_not_write_chunk_terminator(self):
         sock = _FragmentedSocket(b"")

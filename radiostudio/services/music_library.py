@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import stat
+import tempfile
 import time
 import uuid
 from contextlib import contextmanager
@@ -140,8 +141,8 @@ class MusicLibrary:
 
     @staticmethod
     def _entries(directory: Path):
-        """Return one directory snapshot through a single testable filesystem boundary."""
-        return list(directory.iterdir())
+        """Stream one directory through a single testable filesystem boundary."""
+        return directory.iterdir()
 
     def scan_library(self, library_id: str):
         """Re-index one folder tree. Returns (indexed, skipped, errors)."""
@@ -152,17 +153,14 @@ class MusicLibrary:
         root = Path(library["root"])
         if not root.is_dir():
             raise FileNotFoundError(f"Pasta da biblioteca não encontrada: {root}")
-        seen, indexed, skipped, errors = set(), 0, 0, 0
-        with self._connect() as db:
-            existing = {row["path"]: (row["mtime_ns"], row["size"])
-                        for row in db.execute(
-                            "SELECT path, mtime_ns, size FROM tracks WHERE library_id=?",
-                            (library_id,))}
-        # Walk one directory at a time so an inaccessible folder does not abort the scan.
-        folders, discovery_errors = self._subdirectories(root)
-        errors += discovery_errors
-        complete = discovery_errors == 0
+        indexed, skipped, errors = 0, 0, 0
+        # Process each directory as it is enumerated. This avoids a second
+        # directory walk. A temporary SQLite table tracks discovered paths so
+        # scans of large libraries do not keep two full path indexes in RAM.
+        folders = [root]
+        complete = True
         batch = []
+        seen_batch = []
         upsert = """INSERT INTO tracks(path, library_id, mtime_ns, size, title,
             artist, album, albumartist, genre, year, composer, duration)
             VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -172,94 +170,108 @@ class MusicLibrary:
             genre=excluded.genre, year=excluded.year, composer=excluded.composer,
             duration=excluded.duration"""
 
-        def flush_batch():
-            nonlocal errors, indexed, complete
-            if not batch:
-                return
-            try:
-                with self._connect() as db:
-                    db.executemany(upsert, batch)
-                indexed += len(batch)
-            except sqlite3.Error:
-                errors += len(batch)
-                # A partial write means this traversal is not authoritative.
-                # Keep stale rows until a later scan can index every discovered
-                # track, instead of deleting valid entries after a lock or I/O
-                # error interrupted one batch.
-                complete = False
-            batch.clear()
+        with tempfile.TemporaryDirectory(prefix="radiostudio-scan-") as temporary:
+            seen_database = Path(temporary) / "seen.sqlite3"
+            with self._connect() as db:
+                db.execute("ATTACH DATABASE ? AS scan_cache", (str(seen_database),))
+                db.execute("CREATE TABLE scan_cache.seen (path TEXT PRIMARY KEY NOT NULL) WITHOUT ROWID")
 
-        for directory in [root, *folders]:
-            try:
-                entries = self._entries(directory)
-            except OSError:
-                errors += 1
-                complete = False
-                continue
-            for file in entries:
-                try:
-                    file_info = file.stat()
-                    if (not stat.S_ISREG(file_info.st_mode)
-                            or file.suffix.lower() not in AUDIO_EXTENSIONS):
+                def flush_batch():
+                    nonlocal errors, indexed, complete
+                    if not batch and not seen_batch:
+                        return
+                    try:
+                        if seen_batch:
+                            db.executemany(
+                                "INSERT OR IGNORE INTO scan_cache.seen(path) VALUES(?)",
+                                seen_batch)
+                        if batch:
+                            db.executemany(upsert, batch)
+                        db.commit()
+                        indexed += len(batch)
+                    except sqlite3.Error:
+                        db.rollback()
+                        errors += max(len(batch), len(seen_batch))
+                        # A partial write means this traversal is not
+                        # authoritative. Keep stale rows until a later scan
+                        # can index every discovered track.
+                        complete = False
+                    finally:
+                        batch.clear()
+                        seen_batch.clear()
+
+                while folders:
+                    directory = folders.pop()
+                    try:
+                        entries = self._entries(directory)
+                    except OSError:
+                        errors += 1
+                        complete = False
                         continue
-                    path = str(file.resolve())
-                    seen.add(path)
-                    if existing.get(path) == (file_info.st_mtime_ns, file_info.st_size):
-                        skipped += 1
-                        continue
-                    metadata = read_track_metadata(path)
-                    batch.append((path, library_id, file_info.st_mtime_ns, file_info.st_size,
-                                  metadata.title, metadata.artist, metadata.album,
-                                  metadata.albumartist, metadata.genre, metadata.year,
-                                  metadata.composer, metadata.duration))
-                    if len(batch) >= 100:
-                        flush_batch()
-                except (OSError, ValueError, sqlite3.Error):
-                    errors += 1
-                    complete = False
-        flush_batch()
-        # Remove deleted files from this library only after a completed traversal.
-        with self._connect() as db:
-            existing = {row[0] for row in db.execute("SELECT path FROM tracks WHERE library_id=?", (library_id,))}
-            stale = existing - seen if complete else set()
-            if stale:
-                db.executemany("DELETE FROM tracks WHERE path=? AND library_id=?",
-                               ((path, library_id) for path in stale))
-            count = db.execute("SELECT COUNT(*) FROM tracks WHERE library_id=?", (library_id,)).fetchone()[0]
-            db.execute("UPDATE libraries SET last_scan=?, track_count=? WHERE id=?",
-                       (time.time(), count, library_id))
+                    try:
+                        for file in entries:
+                            try:
+                                entry_info = file.stat(follow_symlinks=False)
+                                if stat.S_ISDIR(entry_info.st_mode):
+                                    folders.append(file)
+                                    continue
+                                if file.suffix.lower() not in AUDIO_EXTENSIONS:
+                                    continue
+                                # Preserve indexing of symlinked media files,
+                                # while not following directory symlinks into
+                                # trees outside the library.
+                                file_info = (entry_info if stat.S_ISREG(entry_info.st_mode)
+                                             else file.stat())
+                                if not stat.S_ISREG(file_info.st_mode):
+                                    continue
+                                path = str(file.resolve())
+                                seen_batch.append((path,))
+                                existing = db.execute(
+                                    "SELECT mtime_ns, size FROM tracks WHERE library_id=? AND path=?",
+                                    (library_id, path)).fetchone()
+                                if (existing is not None
+                                        and (existing["mtime_ns"], existing["size"])
+                                        == (file_info.st_mtime_ns, file_info.st_size)):
+                                    skipped += 1
+                                else:
+                                    metadata = read_track_metadata(path)
+                                    batch.append((path, library_id, file_info.st_mtime_ns,
+                                                  file_info.st_size, metadata.title,
+                                                  metadata.artist, metadata.album,
+                                                  metadata.albumartist, metadata.genre,
+                                                  metadata.year, metadata.composer,
+                                                  metadata.duration))
+                                if len(seen_batch) >= 100:
+                                    flush_batch()
+                            except (OSError, RuntimeError, ValueError, sqlite3.Error):
+                                errors += 1
+                                complete = False
+                    except OSError:
+                        # Path.iterdir() is lazy, so filesystem errors can be
+                        # raised after iteration starts rather than on creation.
+                        errors += 1
+                        complete = False
+                flush_batch()
+
+                # Remove deleted files from this library only after a completed
+                # traversal. The temp table keeps this cleanup bounded in RAM.
+                if complete:
+                    try:
+                        db.execute(
+                            "DELETE FROM tracks WHERE library_id=? AND NOT EXISTS ("
+                            "SELECT 1 FROM scan_cache.seen AS seen WHERE seen.path=tracks.path)",
+                            (library_id,))
+                        db.commit()
+                    except sqlite3.Error:
+                        db.rollback()
+                        errors += 1
+                        complete = False
+                count = db.execute(
+                    "SELECT COUNT(*) FROM tracks WHERE library_id=?", (library_id,)
+                ).fetchone()[0]
+                db.execute("UPDATE libraries SET last_scan=?, track_count=? WHERE id=?",
+                           (time.time(), count, library_id))
         return indexed, skipped, errors
-
-    @staticmethod
-    def _subdirectories(root):
-        stack = []
-        errors = 0
-        result = []
-
-        def add_subdirectories(folder):
-            nonlocal errors
-            try:
-                entries = MusicLibrary._entries(folder)
-            except OSError:
-                errors += 1
-                return []
-            directories = []
-            for entry in entries:
-                try:
-                    info = entry.stat(follow_symlinks=False)
-                except OSError:
-                    errors += 1
-                    continue
-                if stat.S_ISDIR(info.st_mode):
-                    directories.append(entry)
-            return directories
-
-        stack.extend(add_subdirectories(root))
-        while stack:
-            folder = stack.pop()
-            result.append(folder)
-            stack.extend(add_subdirectories(folder))
-        return result, errors
 
     def tracks_for_libraries(self, library_ids):
         ids = [str(value) for value in library_ids]

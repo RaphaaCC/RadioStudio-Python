@@ -1,3 +1,4 @@
+import io
 import queue
 import threading
 import time
@@ -69,6 +70,39 @@ class _ActiveProcess:
         self.terminated = True
 
 
+class _TerminatedEncoderProcess:
+    def __init__(self):
+        self.returncode = None
+        self.stdin = io.BytesIO()
+        self.stdout = io.BytesIO()
+        self.stderr = None
+
+    def poll(self):
+        return self.returncode
+
+    def terminate(self):
+        self.returncode = -15
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+
+class _FailAfterSignalQueue:
+    def __init__(self, output, process):
+        self.output = output
+        self.process = process
+
+    def get(self, timeout=None):
+        self.output._signal_connection_failure("Connection reset by peer", self.process)
+        raise queue.Empty
+
+
+class _StopAfterRetryWait(threading.Event):
+    def wait(self, timeout=None):
+        self.set()
+        return True
+
+
 class _StopAfterOneFrame(threading.Event):
     def wait(self, timeout=None):
         self.set()
@@ -121,6 +155,104 @@ class BroadcastQualityTests(unittest.TestCase):
         self.assertEqual(manager._mix_source_samples()[0], 250)
         self.assertEqual(manager._mix_source_samples()[0], 250)
         self.assertEqual(manager._mix_source_samples()[0], 750)
+
+    def test_master_gain_scales_music_cart_microphone_and_auxiliary_bus(self):
+        manager = BroadcastManager()
+        manager.outputs.append(object())
+        frame = array("h", [1000] * (PCM_BYTES_PER_FRAME // 2)).tobytes()
+        manager.push_audio("main", frame * 2, 1.0)
+        manager.push_audio("cart-1", frame * 2, 0.5)
+        manager.push_audio("input-microphone", frame * 2, 0.25)
+        manager.push_audio("input-aux-1", frame * 2, 0.1)
+
+        manager.set_master_gain(0.4)
+
+        mixed = manager._mix_source_samples()
+        self.assertEqual(mixed[0], 740)
+
+    def test_remote_title_updates_are_serial_and_keep_only_the_latest_pending_title(self):
+        manager = BroadcastManager()
+        manager.profiles = [{"id": "radio", "name": "Rádio"}]
+        first_send_started = threading.Event()
+        release_first_send = threading.Event()
+        second_send_started = threading.Event()
+        sent_titles = []
+
+        def send_metadata(_profile, title):
+            if title == "Faixa antiga":
+                first_send_started.set()
+                release_first_send.wait(2)
+            elif title == "Faixa intermediária":
+                second_send_started.set()
+            sent_titles.append(title)
+
+        with patch("radiostudio.services.broadcast.get_password", return_value="secret"), \
+                patch.object(BroadcastManager, "_send_metadata", side_effect=send_metadata):
+            manager.set_title("Faixa antiga")
+            self.assertTrue(first_send_started.wait(1))
+            manager.set_title("Faixa intermediária")
+            manager.set_title("Faixa atual")
+            self.assertFalse(second_send_started.wait(0.05))
+            release_first_send.set()
+
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                with manager._metadata_lock:
+                    if not manager._metadata_active:
+                        break
+                time.sleep(0.01)
+
+        self.assertEqual(sent_titles, ["Faixa antiga", "Faixa atual"])
+
+    def test_track_change_mode_only_publishes_actual_track_changes(self):
+        manager = BroadcastManager()
+        manager.profiles = [{"id": "radio", "name": "Rádio"}]
+        manager.set_metadata_update_preferences("track_change", 45)
+
+        with patch.object(manager, "_queue_metadata_update") as queue_update:
+            manager.set_title("Título definido pelas configurações")
+            queue_update.assert_not_called()
+            self.assertEqual(manager.title, "Título definido pelas configurações")
+
+            manager.set_track_title("Nova faixa")
+
+        queue_update.assert_called_once_with(manager.profiles[0], "Nova faixa")
+
+    def test_interval_metadata_scheduler_republishes_the_current_title(self):
+        manager = BroadcastManager()
+        manager.title = "Faixa atual"
+        manager.set_metadata_update_preferences("interval", 45)
+        waited = []
+
+        class StopEvent:
+            stopped = False
+
+            def is_set(self):
+                return self.stopped
+
+            def wait(self, _seconds=None):
+                return False
+
+        class ScheduleEvent:
+            def clear(self):
+                pass
+
+            def wait(self, seconds=None):
+                waited.append(seconds)
+                return False
+
+        manager.stop_event = StopEvent()
+        manager._metadata_schedule_changed = ScheduleEvent()
+
+        def publish(title):
+            manager.stop_event.stopped = True
+            self.assertEqual(title, "Faixa atual")
+
+        with patch.object(manager, "_publish_metadata_title", side_effect=publish) as publish_title:
+            manager._metadata_schedule_loop()
+
+        self.assertEqual(waited, [45])
+        publish_title.assert_called_once_with("Faixa atual")
 
     def test_mixer_isolates_bad_source_and_output(self):
         for manager_type in (BaseBroadcastManager, BroadcastManager):
@@ -313,6 +445,22 @@ class BroadcastQualityTests(unittest.TestCase):
         self.assertTrue(output.connection_failed.is_set())
         self.assertTrue(process.terminated)
         self.assertEqual(output.dropped_encoded_chunks, 1)
+
+    def test_reconnect_preserves_network_error_when_it_terminates_encoder(self):
+        process = _TerminatedEncoderProcess()
+        output = EncoderOutput("Icecast", 128, destination=object())
+        output.queue = _FailAfterSignalQueue(output, process)
+        output.stop_event = _StopAfterRetryWait()
+        states = []
+        output.status_callback = lambda: states.append((output.status, output.error))
+
+        with patch("radiostudio.services.broadcast.imageio_ffmpeg.get_ffmpeg_exe",
+                   return_value="ffmpeg"), \
+                patch("radiostudio.services.broadcast.subprocess.Popen",
+                      return_value=process):
+            output._run()
+
+        self.assertIn(("Reconectando", "Connection reset by peer"), states)
 
     def test_network_backpressure_terminates_encoder_to_unblock_pcm_writer(self):
         output = EncoderOutput("teste", 128, destination=object())

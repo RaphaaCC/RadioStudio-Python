@@ -3,7 +3,6 @@
 import logging
 import math
 import os
-import re
 import shutil
 import uuid
 
@@ -13,7 +12,11 @@ from ..runtime_safety import guarded
 from ..services.audio_paths import same_audio_path
 from ..services.audio_inputs import INPUT_CHANNELS
 from ..services.discord_presence import validate_public_cover_url, validate_public_radio_url
+from ..services.control_api import API_DEFAULT_PORT, parse_allowed_origins
 from ..services.process_priority import apply_process_priority, normalize_process_priority
+from ..services.recording import sanitize_recording_schedules, SUPPORTED_BITRATES
+from ..services.schedule_engine import normalize_event
+from .recording_panel import default_recording_folder
 
 
 def _tuple_tree(value):
@@ -38,6 +41,18 @@ def bounded_float(value, default, low, high):
     if not math.isfinite(parsed):
         parsed = default
     return min(high, max(low, parsed))
+
+
+def _state_bool(state, key, default=False):
+    """Read a saved boolean, defaulting safely when a present value is malformed."""
+    if key not in state:
+        return default
+    value = state[key]
+    if isinstance(value, bool):
+        return value
+    if type(value) is int and value in (0, 1):
+        return bool(value)
+    return False
 
 
 class PersistenceMixin:
@@ -108,10 +123,52 @@ class PersistenceMixin:
             state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
             if not isinstance(state, dict):
                 raise ValueError("O arquivo de estado precisa conter um objeto JSON.")
+            saved_language = state.get("language_preference")
+            if isinstance(saved_language, str):
+                from ..i18n import normalize_language
+                self.language_preference = normalize_language(saved_language) or "system"
             saved_tracks = state.get("tracks", [])
             if not isinstance(saved_tracks, list):
                 saved_tracks = []
             self.tracks = [path for path in saved_tracks if isinstance(path, str) and path.strip()]
+            saved_recording = state.get("recording", {})
+            if isinstance(saved_recording, dict):
+                saved_folder = saved_recording.get("folder")
+                saved_format = saved_recording.get("format", "mp3")
+                saved_bitrate = saved_recording.get("bitrate", 192)
+                if type(saved_bitrate) is not int or saved_bitrate not in SUPPORTED_BITRATES:
+                    saved_bitrate = 192
+                self.recording_config = {
+                    "folder": (saved_folder.strip() if isinstance(saved_folder, str)
+                               and saved_folder.strip() else str(default_recording_folder())),
+                    "format": (saved_format if isinstance(saved_format, str)
+                               and saved_format in {"mp3", "wav"} else "mp3"),
+                    "bitrate": saved_bitrate,
+                    "auto_on_broadcast": saved_recording.get("auto_on_broadcast") is True,
+                }
+            self.recording_schedules = sanitize_recording_schedules(
+                state.get("recording_schedules", []))
+            saved_api = state.get("control_api", {})
+            if isinstance(saved_api, dict):
+                saved_port = saved_api.get("port", API_DEFAULT_PORT)
+                if type(saved_port) is not int or not 1 <= saved_port <= 65535:
+                    saved_port = API_DEFAULT_PORT
+                saved_auth_mode = saved_api.get("auth_mode", "token")
+                if not isinstance(saved_auth_mode, str) or saved_auth_mode not in {"basic", "token"}:
+                    saved_auth_mode = "token"
+                try:
+                    saved_origins = list(parse_allowed_origins(
+                        saved_api.get("allowed_origins", [])))
+                except ValueError:
+                    saved_origins = []
+                    logging.getLogger("radiostudio").warning(
+                        "Origens CORS inválidas foram ignoradas nas configurações salvas")
+                self.control_api_config = {
+                    "enabled": saved_api.get("enabled") is True,
+                    "port": saved_port,
+                    "auth_mode": saved_auth_mode,
+                    "allowed_origins": saved_origins,
+                }
             saved_sources = state.get("track_sources", [])
             if not isinstance(saved_sources, list):
                 saved_sources = []
@@ -127,22 +184,9 @@ class PersistenceMixin:
             self.events = []
             if isinstance(saved_events, list):
                 for event in saved_events:
-                    if not isinstance(event, dict):
-                        continue
-                    event_time = str(event.get("time", ""))
-                    try:
-                        day = int(event.get("day", 0))
-                    except (TypeError, ValueError, OverflowError):
-                        continue
-                    path = event.get("path")
-                    if (isinstance(path, str) and path.strip()
-                            and re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", event_time)
-                            and 0 <= day <= 7):
-                        event_id = event.get("id")
-                        if not isinstance(event_id, str) or not event_id:
-                            event_id = uuid.uuid4().hex
-                        self.events.append({"id": event_id, "path": path, "time": event_time, "day": day,
-                                            "enabled": bool(event.get("enabled", True))})
+                    normalized_event = normalize_event(event)
+                    if normalized_event is not None:
+                        self.events.append(normalized_event)
             saved_carts = state.get("carts", [])
             if not isinstance(saved_carts, list):
                 saved_carts = []
@@ -158,17 +202,24 @@ class PersistenceMixin:
                     for channel in INPUT_CHANNELS}
             self.mic_music_level_percent = bounded_int(
                 state.get("mic_music_level_percent", 35), 35, 0, 100)
-            self.dynamic_mic_duck = bool(state.get("dynamic_mic_duck", False))
+            self.dynamic_mic_duck = _state_bool(state, "dynamic_mic_duck", False)
             self.speech_music_level_percent = bounded_int(
                 state.get("speech_music_level_percent", 20), 20, 0, 100)
             self.speech_threshold_db = bounded_float(
                 state.get("speech_threshold_db", -38), -38.0, -80.0, -10.0)
-            self.local_master_enabled = bool(state.get("local_master_enabled", True))
-            self.master_volume = bounded_float(state.get("master_volume", 0.8), 0.8, 0.0, 1.0)
-            self.volume_slider.setValue(round(self.master_volume * 100))
-            self.minimize_to_tray = bool(state.get("minimize_to_tray", True))
-            self.resume_on_startup = bool(state.get("resume_on_startup", True))
-            self.auto_start_broadcast = bool(state.get("auto_start_broadcast", False))
+            self.local_master_enabled = _state_bool(state, "local_master_enabled", True)
+            self.monitor_volume = bounded_float(
+                state.get("monitor_volume", state.get("master_volume", 0.8)),
+                0.8, 0.0, 1.0)
+            self.master_live_volume = bounded_float(
+                state.get("master_live_volume", 1.0), 1.0, 0.0, 1.0)
+            self.monitor_volume_slider.setValue(round(self.monitor_volume * 100))
+            self.master_live_volume_slider.setValue(round(self.master_live_volume * 100))
+            self.broadcast.set_master_gain(self.master_live_volume)
+            self.apply_monitor_output_gains()
+            self.minimize_to_tray = _state_bool(state, "minimize_to_tray", True)
+            self.resume_on_startup = _state_bool(state, "resume_on_startup", True)
+            self.auto_start_broadcast = _state_bool(state, "auto_start_broadcast", False)
             self.process_priority = normalize_process_priority(
                 state.get("process_priority", "normal"))
             priority_applied, priority_error = apply_process_priority(self.process_priority)
@@ -192,13 +243,13 @@ class PersistenceMixin:
                 state.get("backup_last_run", 0), 0.0, 0.0, time.time() + 31536000)
             if self.backup_last_run > time.time():
                 self.backup_last_run = 0.0
-            self.broadcast_was_running = bool(state.get("broadcast_was_running", False))
+            self.broadcast_was_running = _state_bool(state, "broadcast_was_running", False)
             # The application ID belongs to RadioStudio; users do not need to
             # create or configure their own Discord Developer application.
             self.discord_client_id = DISCORD_APPLICATION_ID
-            self.discord_enabled = bool(state.get("discord_enabled", False))
-            self.discord_share_track = bool(state.get("discord_share_track", True))
-            self.discord_use_track_cover = bool(state.get("discord_use_track_cover", False))
+            self.discord_enabled = _state_bool(state, "discord_enabled", False)
+            self.discord_share_track = _state_bool(state, "discord_share_track", True)
+            self.discord_use_track_cover = _state_bool(state, "discord_use_track_cover", False)
             try:
                 self.discord_cover_url = validate_public_cover_url(
                     state.get("discord_cover_url", ""))
@@ -243,9 +294,9 @@ class PersistenceMixin:
             saved_autodj = state.get("autodj", {})
             if isinstance(saved_autodj, dict):
                 self.autodj_config.update(saved_autodj)
-            self.autodj_config["enabled"] = bool(self.autodj_config.get("enabled", False))
-            self.autodj_config["remove_played_from_queue"] = bool(
-                self.autodj_config.get("remove_played_from_queue", False))
+            self.autodj_config["enabled"] = _state_bool(self.autodj_config, "enabled", False)
+            self.autodj_config["remove_played_from_queue"] = _state_bool(
+                self.autodj_config, "remove_played_from_queue", False)
             for key, default, maximum in (("artist_cooldown_minutes", 60, 10080),
                                           ("track_cooldown_minutes", 360, 43200),
                                           ("queue_ahead", 4, 30)):
@@ -255,13 +306,19 @@ class PersistenceMixin:
                     value = default
                 self.autodj_config[key] = min(maximum, max(1 if key == "queue_ahead" else 0, value))
             saved_programs = state.get("autodj_programs", [])
-            self.autodj_programs = [program for program in saved_programs
-                                    if isinstance(program, dict)] if isinstance(saved_programs, list) else []
+            self.autodj_programs = []
+            if isinstance(saved_programs, list):
+                for program in saved_programs:
+                    if isinstance(program, dict):
+                        normalized_program = dict(program)
+                        normalized_program["enabled"] = _state_bool(
+                            program, "enabled", True)
+                        self.autodj_programs.append(normalized_program)
             self.fade_in_ms = bounded_int(state.get("fade_in_ms", 0), 0, 0, 30000)
             self.fade_out_ms = bounded_int(state.get("fade_out_ms", 0), 0, 0, 30000)
             self.mix_ms = bounded_int(state.get("mix_ms", 0), 0, 0, 30000)
-            self.auto_transitions_enabled = bool(state.get("auto_transitions_enabled", False))
-            self.trim_silence = bool(state.get("trim_silence", False))
+            self.auto_transitions_enabled = _state_bool(state, "auto_transitions_enabled", False)
+            self.trim_silence = _state_bool(state, "trim_silence", False)
             self.silence_threshold_db = bounded_float(
                 state.get("silence_threshold_db", -42), -42.0, -80.0, -10.0)
             self.silence_hold_ms = bounded_int(
@@ -285,13 +342,21 @@ class PersistenceMixin:
                              if isinstance(playback.get("path", ""), str) else ""),
                     "index": bounded_int(playback.get("index", -1), -1, -1, 1_000_000),
                     "position_ms": position_ms,
-                    "was_playing": bool(playback.get("was_playing", False)),
+                    "was_playing": _state_bool(playback, "was_playing", False),
                 }
             saved_metadata = state.get("station_metadata", {})
             self.station_metadata = {**DEFAULT_STATION_METADATA,
                                      **(saved_metadata if isinstance(saved_metadata, dict) else {})}
             self.station_metadata = {key: str(value or "")
                                      for key, value in self.station_metadata.items()}
+            metadata_update_mode = state.get("metadata_update_mode", "current")
+            self.metadata_update_mode = (
+                metadata_update_mode if isinstance(metadata_update_mode, str) and metadata_update_mode in
+                {"current", "track_change", "interval"} else "current")
+            self.metadata_update_interval_seconds = bounded_int(
+                state.get("metadata_update_interval_seconds", 30), 30, 5, 3600)
+            self.broadcast.set_metadata_update_preferences(
+                self.metadata_update_mode, self.metadata_update_interval_seconds)
             explorer_folder = state.get("explorer_folder", "")
             if not isinstance(explorer_folder, str):
                 explorer_folder = ""
@@ -334,12 +399,13 @@ class PersistenceMixin:
                 logging.getLogger("radiostudio").exception(
                     "Não foi possível preservar uma cópia dos dados salvos inválidos")
                 recovery_path = None
-            message = f"Não foi possível carregar os dados salvos:\n{exc}"
+            message = translate("Não foi possível carregar os dados salvos:") + f"\n{exc}"
             if recovery_path is not None:
                 logging.getLogger("radiostudio").warning(
                     "Cópia recuperável das configurações preservada em %s", recovery_path)
-                message += f"\n\nUma cópia foi preservada em:\n{recovery_path}"
-            QMessageBox.warning(self, "Configuração", message)
+                message += ("\n\n" + translate("Uma cópia foi preservada em:")
+                            + f"\n{recovery_path}")
+            show_warning(self, translate("Configuração"), message)
 
     @guarded
     def save_state(self):
@@ -348,7 +414,25 @@ class PersistenceMixin:
         if not self.is_quitting:
             self.capture_playback()
         APP_DIR.mkdir(parents=True, exist_ok=True)
+        recording_config = getattr(self, "recording_config", {})
+        recording_format = recording_config.get("format", "mp3")
+        if not isinstance(recording_format, str) or recording_format not in {"mp3", "wav"}:
+            recording_format = "mp3"
+        recording_bitrate = recording_config.get("bitrate", 192)
+        if type(recording_bitrate) is not int or recording_bitrate not in SUPPORTED_BITRATES:
+            recording_bitrate = 192
+        recording_folder = recording_config.get("folder", "")
+        if not isinstance(recording_folder, str):
+            recording_folder = ""
         data = {"tracks": self.tracks, "track_sources": self.track_sources,
+                "recording": {
+                    "folder": recording_folder,
+                    "format": recording_format,
+                    "bitrate": recording_bitrate,
+                    "auto_on_broadcast": bool(recording_config.get(
+                        "auto_on_broadcast", False)),
+                },
+                "recording_schedules": getattr(self, "recording_schedules", []),
                 "events": self.events, "carts": self.carts,
                 "autodj": self.autodj_config, "autodj_programs": self.autodj_programs,
                 "autodj_queue_signature": self.autodj_last_signature,
@@ -360,7 +444,9 @@ class PersistenceMixin:
                 "speech_music_level_percent": self.speech_music_level_percent,
                 "speech_threshold_db": self.speech_threshold_db,
                 "local_master_enabled": self.local_master_enabled,
-                "master_volume": self.master_volume,
+                "monitor_volume": self.monitor_volume,
+                "master_volume": self.monitor_volume,
+                "master_live_volume": self.master_live_volume,
                 "minimize_to_tray": self.minimize_to_tray,
                 "resume_on_startup": self.resume_on_startup,
                 "auto_start_broadcast": self.auto_start_broadcast,
@@ -370,6 +456,15 @@ class PersistenceMixin:
                 "backup_interval_seconds": self.backup_interval_seconds,
                 "backup_retention": self.backup_retention,
                 "backup_last_run": self.backup_last_run,
+                "control_api": {
+                    "enabled": bool(self.control_api_config.get("enabled", False)),
+                    "port": int(self.control_api_config.get("port", API_DEFAULT_PORT)),
+                    "auth_mode": ("basic" if self.control_api_config.get("auth_mode") == "basic"
+                                  else "token"),
+                    "allowed_origins": list(self.control_api_config.get(
+                        "allowed_origins", [])),
+                },
+                "language_preference": self.language_preference,
                 "broadcast_was_running": self.broadcast_was_running,
                 "discord_client_id": DISCORD_APPLICATION_ID,
                 "discord_enabled": self.discord_enabled,
@@ -397,6 +492,8 @@ class PersistenceMixin:
                 "waveform_visualizers_enabled": self.waveform_visualizers_enabled,
                 "playback": self.last_playback,
                 "station_metadata": self.station_metadata,
+                "metadata_update_mode": self.metadata_update_mode,
+                "metadata_update_interval_seconds": self.metadata_update_interval_seconds,
                 "explorer_folder": self.explorer_folder,
                 "broadcast_profiles": self.broadcast_panel.profiles,
                 "local_broadcast": self.broadcast_panel.local_config()}
@@ -427,8 +524,12 @@ class PersistenceMixin:
         self.broadcast_was_running = bool(self.broadcast.running)
         self.capture_playback()
         self.is_quitting = True
+        bridge = getattr(self, "control_api_bridge", None)
+        if bridge is not None:
+            bridge.set_active(False)
         self.save_state()
         cleanup_steps = [
+            ("API REST", self.control_api.stop),
             ("pré-escuta", self.preview_player.stop),
             ("decodificador da pré-escuta", self.preview_dialog.shutdown_fallback),
             ("cart wall", self.stop_all_carts),

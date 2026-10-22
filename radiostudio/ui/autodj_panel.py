@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QRunnable, Qt, Signal
+from PySide6.QtCore import QObject, QRunnable, QSize, Qt, Signal
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGridLayout,
     QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
@@ -16,8 +16,10 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import QTime, QThreadPool, QTimer
 
 from ..services.autodj import DAY_NAMES, FILTER_FIELDS, active_program
+from ..i18n import translate, translate_dialog_buttons
+from .message_boxes import ask_question, show_warning
 from ..runtime_safety import guarded
-from .icons import apply_app_icon
+from .icons import apply_app_icon, translated_icon_label, ui_icon
 
 
 def _text(value, default=""):
@@ -54,28 +56,28 @@ class ProgramDialog(QDialog):
     def __init__(self, libraries, program=None, parent=None):
         super().__init__(parent)
         apply_app_icon(self)
-        self.setWindowTitle("Programação AutoDJ")
+        self.setWindowTitle(translate("Programação AutoDJ"))
         self.resize(570, 610)
         program = program or {}
         root = QVBoxLayout(self)
         form = QFormLayout()
-        self.name = QLineEdit(_text(program.get("name", "Novo bloco"), "Novo bloco"))
-        form.addRow("Nome do bloco", self.name)
-        self.enabled = QCheckBox("Bloco ativo")
+        self.name = QLineEdit(_text(program.get("name"), translate("Novo bloco")))
+        form.addRow(translate("Nome do bloco"), self.name)
+        self.enabled = QCheckBox(translate("Bloco ativo"))
         self.enabled.setChecked(bool(program.get("enabled", True)))
-        form.addRow("Estado", self.enabled)
+        form.addRow(translate("Estado"), self.enabled)
         self.start = self._time_edit(_text(program.get("start", "00:00"), "00:00"))
         self.end = self._time_edit(_text(program.get("end", "01:00"), "01:00"))
         hours = QHBoxLayout()
-        hours.addWidget(QLabel("Das")); hours.addWidget(self.start)
-        hours.addWidget(QLabel("até")); hours.addWidget(self.end); hours.addStretch()
-        form.addRow("Intervalo", hours)
+        hours.addWidget(QLabel(translate("Das"))); hours.addWidget(self.start)
+        hours.addWidget(QLabel(translate("até"))); hours.addWidget(self.end); hours.addStretch()
+        form.addRow(translate("Intervalo"), hours)
         self.priority = QSpinBox(); self.priority.setRange(-100, 100)
         self.priority.setValue(_integer(program.get("priority", 0)))
-        form.addRow("Prioridade (maior vence)", self.priority)
+        form.addRow(translate("Prioridade (maior vence)"), self.priority)
         root.addLayout(form)
 
-        day_box = QGroupBox("Dias da semana")
+        day_box = QGroupBox(translate("Dias da semana"))
         day_layout = QHBoxLayout(day_box)
         saved_days = set()
         raw_days = program.get("days", list(range(7)))
@@ -89,47 +91,57 @@ class ProgramDialog(QDialog):
                     saved_days.add(day)
         self.days = []
         for index, label in enumerate(DAY_NAMES):
-            check = QCheckBox(label); check.setChecked(index in saved_days)
+            check = QCheckBox(translate(label)); check.setChecked(index in saved_days)
             day_layout.addWidget(check); self.days.append(check)
         root.addWidget(day_box)
 
-        library_box = QGroupBox("Bibliotecas (sem seleção = todas habilitadas)")
+        library_box = QGroupBox(translate("Bibliotecas (sem seleção = todas habilitadas)"))
         library_layout = QVBoxLayout(library_box)
         self.library_list = QListWidget()
         raw_libraries = program.get("library_ids", [])
         saved_libraries = ({str(value) for value in raw_libraries}
                            if isinstance(raw_libraries, (list, tuple, set)) else set())
+        available_library_ids = {str(library.get("id")) for library in libraries}
         for library in libraries:
+            label = f"{library['name']} — {library['root']}"
             if not library.get("enabled", 1):
-                continue
-            item = QListWidgetItem(f"📚 {library['name']} — {library['root']}")
+                label += f" ({translate('Desativado')})"
+            item = QListWidgetItem(label)
+            item.setIcon(ui_icon("libraries"))
             item.setData(Qt.UserRole, library["id"])
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Checked if library["id"] in saved_libraries else Qt.Unchecked)
+            item.setCheckState(Qt.Checked if str(library["id"]) in saved_libraries else Qt.Unchecked)
+            self.library_list.addItem(item)
+        for library_id in sorted(saved_libraries - available_library_ids):
+            item = QListWidgetItem(
+                translate("Biblioteca indisponível ({id})").format(id=library_id))
+            item.setData(Qt.UserRole, library_id)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked)
             self.library_list.addItem(item)
         library_layout.addWidget(self.library_list)
         root.addWidget(library_box, 1)
 
-        filters_box = QGroupBox("Filtros de metadados")
+        filters_box = QGroupBox(translate("Filtros de metadados"))
         filters = QFormLayout(filters_box)
         old_filters = program.get("filters", {})
         if not isinstance(old_filters, dict):
             old_filters = {}
-        self.genres = QLineEdit(_text(old_filters.get("genres"))); self.genres.setPlaceholderText("Rock, Pop, Jazz")
-        self.artists = QLineEdit(_text(old_filters.get("artists"))); self.artists.setPlaceholderText("Artistas exatos, separados por vírgula")
-        self.include = QLineEdit(_text(old_filters.get("include_keywords"))); self.include.setPlaceholderText("Todas as palavras precisam aparecer")
-        self.exclude = QLineEdit(_text(old_filters.get("exclude_keywords"))); self.exclude.setPlaceholderText("Qualquer uma destas palavras elimina a faixa")
-        filters.addRow("Gêneros", self.genres)
-        filters.addRow("Artistas", self.artists)
-        filters.addRow("Título/álbum/artista contém", self.include)
-        filters.addRow("Excluir palavra-chave", self.exclude)
+        self.genres = QLineEdit(_text(old_filters.get("genres"))); self.genres.setPlaceholderText(translate("Rock, Pop, Jazz"))
+        self.artists = QLineEdit(_text(old_filters.get("artists"))); self.artists.setPlaceholderText(translate("Artistas exatos, separados por vírgula"))
+        self.include = QLineEdit(_text(old_filters.get("include_keywords"))); self.include.setPlaceholderText(translate("Todas as palavras precisam aparecer"))
+        self.exclude = QLineEdit(_text(old_filters.get("exclude_keywords"))); self.exclude.setPlaceholderText(translate("Qualquer uma destas palavras elimina a faixa"))
+        filters.addRow(translate("Gêneros"), self.genres)
+        filters.addRow(translate("Artistas"), self.artists)
+        filters.addRow(translate("Título/álbum/artista contém"), self.include)
+        filters.addRow(translate("Excluir palavra-chave"), self.exclude)
         year_row = QHBoxLayout()
         self.year_from = QSpinBox(); self.year_from.setRange(0, 9999); self.year_from.setSpecialValueText("Sem mínimo")
         self.year_to = QSpinBox(); self.year_to.setRange(0, 9999); self.year_to.setSpecialValueText("Sem máximo")
         self.year_from.setValue(_integer(old_filters.get("year_from", 0)))
         self.year_to.setValue(_integer(old_filters.get("year_to", 0)))
-        year_row.addWidget(self.year_from); year_row.addWidget(QLabel("até")); year_row.addWidget(self.year_to); year_row.addStretch()
-        filters.addRow("Ano", year_row)
+        year_row.addWidget(self.year_from); year_row.addWidget(QLabel(translate("até"))); year_row.addWidget(self.year_to); year_row.addStretch()
+        filters.addRow(translate("Ano"), year_row)
         self.field_checks = {}
         fields_row = QGridLayout()
         old_fields = old_filters.get("keyword_fields", ["title", "album", "artist", "albumartist", "genre", "composer", "year"])
@@ -138,11 +150,12 @@ class ProgramDialog(QDialog):
         labels = {"title": "Título", "artist": "Artista", "album": "Álbum", "albumartist": "Artista do álbum",
                   "genre": "Gênero", "composer": "Compositor", "year": "Ano", "path": "Nome/caminho"}
         for index, field in enumerate(FILTER_FIELDS):
-            check = QCheckBox(labels[field]); check.setChecked(field in old_fields)
+            check = QCheckBox(translate(labels[field])); check.setChecked(field in old_fields)
             fields_row.addWidget(check, index // 4, index % 4); self.field_checks[field] = check
-        filters.addRow("Buscar palavras em", fields_row)
+        filters.addRow(translate("Buscar palavras em"), fields_row)
         root.addWidget(filters_box)
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        translate_dialog_buttons(buttons)
         buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
 
@@ -160,16 +173,16 @@ class ProgramDialog(QDialog):
 
     def accept(self):
         if not self.name.text().strip():
-            QMessageBox.warning(self, "Programação", "Informe um nome para o bloco.")
+            show_warning(self, translate("Programação"), translate("Informe um nome para o bloco."))
             return
         if self.start.time() == self.end.time():
-            QMessageBox.warning(self, "Programação", "O início e o fim precisam ser diferentes.")
+            show_warning(self, translate("Programação"), translate("O início e o fim precisam ser diferentes."))
             return
         if not any(check.isChecked() for check in self.days):
-            QMessageBox.warning(self, "Programação", "Selecione pelo menos um dia da semana.")
+            show_warning(self, translate("Programação"), translate("Selecione pelo menos um dia da semana."))
             return
         if self.year_from.value() and self.year_to.value() and self.year_from.value() > self.year_to.value():
-            QMessageBox.warning(self, "Programação", "O ano inicial não pode ser maior que o ano final.")
+            show_warning(self, translate("Programação"), translate("O ano inicial não pode ser maior que o ano final."))
             return
         super().accept()
 
@@ -206,43 +219,51 @@ class AutoDJPanel(QWidget):
         root.setContentsMargins(8, 8, 8, 8)
 
         header = QHBoxLayout()
-        self.toggle = QPushButton("⏹ AutoDJ desligado")
+        self.toggle = QPushButton(
+            translated_icon_label("⏹ AutoDJ desligado", "⏹"))
+        self.toggle.setIcon(ui_icon("autodj"))
+        self.toggle.setIconSize(QSize(22, 22))
         self.toggle.setCheckable(True)
         self.toggle.toggled.connect(self.main_window.set_autodj_enabled)
         header.addWidget(self.toggle)
-        self.status = QLabel("Configure bibliotecas e blocos musicais")
+        self.status = QLabel(translate("Configure bibliotecas e blocos musicais"))
         self.status.setWordWrap(True)
         header.addWidget(self.status, 1)
-        self.fill_button = QPushButton("🎲 Completar fila")
+        self.fill_button = QPushButton(
+            translated_icon_label("🎲 Completar fila", "🎲"))
+        self.fill_button.setIcon(ui_icon("queue_fill"))
+        self.fill_button.setIconSize(QSize(20, 20))
         self.fill_button.clicked.connect(
             lambda _checked=False: self.main_window.fill_autodj_queue(force=True))
         header.addWidget(self.fill_button)
         root.addLayout(header)
 
-        policy_box = QGroupBox("Regras de repetição")
+        policy_box = QGroupBox(translate("Regras de repetição"))
         policy = QHBoxLayout(policy_box)
-        policy.addWidget(QLabel("Evitar artista por"))
-        self.artist_cooldown = QSpinBox(); self.artist_cooldown.setRange(0, 10080); self.artist_cooldown.setSuffix(" min")
-        self.artist_cooldown.setToolTip("0 desativa esta regra")
+        policy.addWidget(QLabel(translate("Evitar artista por")))
+        self.artist_cooldown = QSpinBox(); self.artist_cooldown.setRange(0, 10080); self.artist_cooldown.setSuffix(translate(" min"))
+        self.artist_cooldown.setToolTip(translate("0 desativa esta regra"))
         policy.addWidget(self.artist_cooldown)
-        policy.addWidget(QLabel("Faixa por"))
-        self.track_cooldown = QSpinBox(); self.track_cooldown.setRange(0, 43200); self.track_cooldown.setSuffix(" min")
-        self.track_cooldown.setToolTip("0 desativa esta regra")
+        policy.addWidget(QLabel(translate("Faixa por")))
+        self.track_cooldown = QSpinBox(); self.track_cooldown.setRange(0, 43200); self.track_cooldown.setSuffix(translate(" min"))
+        self.track_cooldown.setToolTip(translate("0 desativa esta regra"))
         policy.addWidget(self.track_cooldown)
-        policy.addWidget(QLabel("Faixas à frente"))
+        policy.addWidget(QLabel(translate("Faixas à frente")))
         self.queue_ahead = QSpinBox(); self.queue_ahead.setRange(1, 30)
         policy.addWidget(self.queue_ahead); policy.addStretch()
         for control in (self.artist_cooldown, self.track_cooldown, self.queue_ahead):
             control.valueChanged.connect(self.save_settings)
         root.addWidget(policy_box)
-        self.remove_played = QCheckBox("🧹 Remover da fila as faixas anteriores à atual")
+        self.remove_played = QCheckBox(translated_icon_label(
+            "🧹 Remover da fila as faixas anteriores à atual", "🧹"))
         self.remove_played.setToolTip(
-            "Ao começar uma faixa, remove as linhas anteriores da Now Playing. "
-            "A faixa atual, as próximas e o histórico de reprodução são preservados.")
+            translate("Ao começar uma faixa, remove as linhas anteriores da Now Playing. "
+            "A faixa atual, as próximas e o histórico de reprodução são preservados."))
         self.remove_played.toggled.connect(self.save_settings)
         root.addWidget(self.remove_played)
 
         self.tabs = QTabWidget()
+        self.tabs.setIconSize(QSize(18, 18))
         root.addWidget(self.tabs, 1)
         self._build_libraries_tab()
         self._build_program_tab()
@@ -256,13 +277,16 @@ class AutoDJPanel(QWidget):
     def _build_libraries_tab(self):
         page = QWidget(); layout = QVBoxLayout(page)
         buttons = QHBoxLayout()
-        for label, handler in (("➕ Adicionar pasta", self.add_library),
-                               ("🔄 Examinar", self.scan_selected),
-                               ("🗑 Remover", self.remove_selected)):
-            button = QPushButton(label); button.clicked.connect(handler); buttons.addWidget(button)
+        for label, marker, handler, icon in (
+                ("➕ Adicionar pasta", "➕", self.add_library, "add_folder"),
+                ("🔄 Examinar", "🔄", self.scan_selected, "refresh"),
+                ("🗑 Remover", "🗑", self.remove_selected, "remove")):
+            button = QPushButton(translated_icon_label(label, marker))
+            button.setIcon(ui_icon(icon))
+            button.clicked.connect(handler); buttons.addWidget(button)
         layout.addLayout(buttons)
         self.library_table = QTableWidget(0, 4)
-        self.library_table.setHorizontalHeaderLabels(["AutoDJ", "Biblioteca", "Faixas", "Pasta"])
+        self.library_table.setHorizontalHeaderLabels([translate("AutoDJ"), translate("Biblioteca"), translate("Faixas"), translate("Pasta")])
         self.library_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.library_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.library_table.horizontalHeader().setStretchLastSection(True)
@@ -270,34 +294,41 @@ class AutoDJPanel(QWidget):
         self.library_table.setColumnWidth(2, 55)
         self.library_table.itemChanged.connect(self.library_toggled)
         layout.addWidget(self.library_table)
-        self.tabs.addTab(page, "📚 Bibliotecas")
+        self.tabs.addTab(page, ui_icon("libraries"),
+                         translated_icon_label("📚 Bibliotecas", "📚"))
 
     def _build_program_tab(self):
         page = QWidget(); layout = QVBoxLayout(page)
-        description = QLabel("Os blocos ativos escolhem a música pelo horário local; fora deles, o AutoDJ mistura todas as bibliotecas habilitadas.")
+        description = QLabel(translate("Os blocos ativos escolhem a música pelo horário local; fora deles, o AutoDJ mistura todas as bibliotecas habilitadas."))
         description.setWordWrap(True); layout.addWidget(description)
         buttons = QHBoxLayout()
-        for label, handler in (("➕ Novo bloco", self.add_program), ("✏️ Editar", self.edit_program),
-                               ("🗑 Excluir", self.delete_program)):
-            button = QPushButton(label); button.clicked.connect(handler); buttons.addWidget(button)
+        for label, marker, handler, icon in (
+                ("➕ Novo bloco", "➕", self.add_program, "add"),
+                ("✏️ Editar", "✏️", self.edit_program, "edit"),
+                ("🗑 Excluir", "🗑", self.delete_program, "remove")):
+            button = QPushButton(translated_icon_label(label, marker))
+            button.setIcon(ui_icon(icon))
+            button.clicked.connect(handler); buttons.addWidget(button)
         layout.addLayout(buttons)
         self.program_table = QTableWidget(0, 6)
-        self.program_table.setHorizontalHeaderLabels(["Ativo", "Bloco", "Dias", "Horário", "Prioridade", "Filtros / bibliotecas"])
+        self.program_table.setHorizontalHeaderLabels([translate("Ativo"), translate("Bloco"), translate("Dias"), translate("Horário"), translate("Prioridade"), translate("Filtros / bibliotecas")])
         self.program_table.horizontalHeader().setStretchLastSection(True)
         self.program_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.program_table.setEditTriggers(QTableWidget.NoEditTriggers)
         layout.addWidget(self.program_table)
-        self.tabs.addTab(page, "🗓 Programação")
+        self.tabs.addTab(page, ui_icon("autodj"),
+                         translated_icon_label("🗓 Programação", "🗓"))
 
     def _build_history_tab(self):
         page = QWidget(); layout = QVBoxLayout(page)
-        header = QHBoxLayout(); header.addWidget(QLabel("Histórico persistente: cada faixa iniciada salva horário e snapshot dos metadados."))
+        header = QHBoxLayout(); header.addWidget(QLabel(translate("Histórico persistente: cada faixa iniciada salva horário e snapshot dos metadados.")))
         header.addStretch()
-        clear_button = QPushButton("🧹 Limpar histórico")
+        clear_button = QPushButton(translated_icon_label("🧹 Limpar histórico", "🧹"))
+        clear_button.setIcon(ui_icon("clear"))
         clear_button.clicked.connect(self.clear_history); header.addWidget(clear_button)
         layout.addLayout(header)
         self.history_table = QTableWidget(0, 7)
-        self.history_table.setHorizontalHeaderLabels(["Quando", "Título", "Artista", "Álbum", "Gênero", "Ano", "Arquivo"])
+        self.history_table.setHorizontalHeaderLabels([translate("Quando"), translate("Título"), translate("Artista"), translate("Álbum"), translate("Gênero"), translate("Ano"), translate("Arquivo")])
         self.history_table.horizontalHeader().setStretchLastSection(True)
         self.history_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.history_table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -305,7 +336,9 @@ class AutoDJPanel(QWidget):
         for column, width in enumerate((145, 165, 130, 130, 100, 60)):
             self.history_table.setColumnWidth(column, width)
         layout.addWidget(self.history_table)
-        self.history_tab_index = self.tabs.addTab(page, "🕘 Histórico")
+        self.history_tab_index = self.tabs.addTab(
+            page, ui_icon("history"),
+            translated_icon_label("🕘 Histórico", "🕘"))
 
     @guarded
     def _tab_changed(self, index):
@@ -347,7 +380,10 @@ class AutoDJPanel(QWidget):
         self._set_toggle_label(bool(config.get("enabled", False)))
 
     def _set_toggle_label(self, enabled):
-        self.toggle.setText("🟢 AutoDJ ligado" if enabled else "⏹ AutoDJ desligado")
+        source = "🟢 AutoDJ ligado" if enabled else "⏹ AutoDJ desligado"
+        marker = "🟢" if enabled else "⏹"
+        self.toggle.setText(translated_icon_label(source, marker))
+        self.toggle.setIcon(ui_icon("autodj"))
 
     def save_settings(self, *_):
         self.main_window.autodj_config.update({
@@ -366,8 +402,9 @@ class AutoDJPanel(QWidget):
 
     def set_status(self, text):
         text = str(text)
-        if self.status.text() != text:
-            self.status.setText(text)
+        display_text = translate(text)
+        if self.status.text() != display_text:
+            self.status.setText(display_text)
 
     @guarded
     def refresh_libraries(self):
@@ -399,17 +436,17 @@ class AutoDJPanel(QWidget):
 
     @guarded
     def add_library(self):
-        folder = QFileDialog.getExistingDirectory(self, "Adicionar biblioteca musical")
+        folder = QFileDialog.getExistingDirectory(self, translate("Adicionar biblioteca musical"))
         if not folder:
             return
-        default_name = Path(folder).name or "Biblioteca"
-        name, accepted = QInputDialog.getText(self, "Nome da biblioteca", "Nome:", text=default_name)
+        default_name = Path(folder).name or translate("Biblioteca")
+        name, accepted = QInputDialog.getText(self, translate("Nome da biblioteca"), translate("Nome:"), text=default_name)
         if not accepted:
             return
         try:
             library_id = self.library.add_library(name, folder)
         except Exception as exc:
-            QMessageBox.warning(self, "Biblioteca", str(exc)); return
+            show_warning(self, translate("Biblioteca"), translate(str(exc))); return
         self.refresh_libraries()
         self._start_scan(library_id)
 
@@ -459,18 +496,15 @@ class AutoDJPanel(QWidget):
         ids = self.selected_library_ids()
         if not ids:
             return
-        answer = QMessageBox.question(self, "Remover bibliotecas", "Remover biblioteca(s) e seus índices? O histórico de reprodução será preservado.")
+        answer = ask_question(self, translate("Remover bibliotecas"), translate("Remover biblioteca(s) e seus índices? O histórico de reprodução será preservado."))
         if answer != QMessageBox.Yes:
             return
         for library_id in ids:
             self.library.remove_library(library_id)
-        for program in self.main_window.autodj_programs:
-            if not isinstance(program, dict):
-                continue
-            selected = program.get("library_ids", [])
-            if not isinstance(selected, (list, tuple, set)):
-                selected = []
-            program["library_ids"] = [value for value in selected if value not in ids]
+        # Keep deleted IDs in program selections. Empty selections mean “all
+        # enabled libraries”; pruning the last selected ID would silently
+        # widen a scheduled block to the entire music library. The editor shows
+        # missing IDs and lets the user remove or replace them explicitly.
         self.refresh_libraries(); self.main_window.save_state()
         self.main_window.autodj_last_signature = None
         self.main_window.fill_autodj_queue(bypass_throttle=True)
@@ -478,7 +512,7 @@ class AutoDJPanel(QWidget):
     @guarded
     def refresh_programs(self):
         programs = self.main_window.autodj_programs
-        libraries = {lib["id"]: lib for lib in self.library.libraries()}
+        libraries = {str(lib["id"]): lib for lib in self.library.libraries()}
         self.program_table.setRowCount(len(programs))
         for row, program in enumerate(programs):
             if not isinstance(program, dict):
@@ -486,7 +520,8 @@ class AutoDJPanel(QWidget):
             active = QTableWidgetItem("✓" if program.get("enabled", True) else "")
             active.setData(Qt.UserRole, program.get("id"))
             self.program_table.setItem(row, 0, active)
-            self.program_table.setItem(row, 1, QTableWidgetItem(str(program.get("name") or "Bloco")))
+            self.program_table.setItem(
+                row, 1, QTableWidgetItem(str(program.get("name") or translate("Bloco"))))
             day_indices = set()
             raw_days = program.get("days", [])
             if not isinstance(raw_days, (list, tuple, set)):
@@ -498,7 +533,7 @@ class AutoDJPanel(QWidget):
                     continue
                 if 0 <= day < 7:
                     day_indices.add(day)
-            days = ", ".join(DAY_NAMES[d] for d in sorted(day_indices))
+            days = ", ".join(translate(DAY_NAMES[d]) for d in sorted(day_indices))
             self.program_table.setItem(row, 2, QTableWidgetItem(days))
             self.program_table.setItem(row, 3, QTableWidgetItem(f"{program.get('start')}–{program.get('end')}"))
             filters = program.get("filters", {})
@@ -509,13 +544,24 @@ class AutoDJPanel(QWidget):
                                ("include_keywords", "Contém")):
                 value = filters.get(key)
                 if value:
-                    bits.append(f"{label}: {value}")
+                    bits.append(f"{translate(label)}: {value}")
             library_ids = program.get("library_ids", [])
             if not isinstance(library_ids, (list, tuple, set)):
                 library_ids = []
-            selected = [libraries[str(value)]["name"] for value in library_ids
-                        if str(value) in libraries]
-            bits.append("Bibliotecas: " + (", ".join(selected) if selected else "todas habilitadas"))
+            requested_ids = [str(value) for value in library_ids if value is not None]
+            selected = [
+                libraries[library_id]["name"] + (
+                    f" ({translate('Desativado')})"
+                    if not libraries[library_id].get("enabled", 1) else "")
+                for library_id in requested_ids if library_id in libraries
+            ]
+            missing = [library_id for library_id in requested_ids if library_id not in libraries]
+            selected.extend(
+                translate("Biblioteca indisponível ({id})").format(id=library_id)
+                for library_id in missing)
+            library_value = (", ".join(selected) if requested_ids
+                             else translate("todas habilitadas"))
+            bits.append(f"{translate('Bibliotecas')}: {library_value}")
             self.program_table.setItem(row, 4, QTableWidgetItem(str(program.get("priority", 0))))
             self.program_table.setItem(row, 5, QTableWidgetItem(" • ".join(bits)))
         self.program_table.resizeColumnsToContents()
@@ -628,7 +674,7 @@ class AutoDJPanel(QWidget):
 
     @guarded
     def clear_history(self):
-        if QMessageBox.question(self, "Limpar histórico", "Apagar o histórico de músicas tocadas? As regras de repetição perderão essa referência.") != QMessageBox.Yes:
+        if ask_question(self, translate("Limpar histórico"), translate("Apagar o histórico de músicas tocadas? As regras de repetição perderão essa referência.")) != QMessageBox.Yes:
             return
         self.library.clear_history()
         self.refresh_history(); self.main_window.save_state()

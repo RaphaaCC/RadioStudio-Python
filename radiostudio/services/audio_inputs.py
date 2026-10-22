@@ -17,6 +17,7 @@ from .broadcast import CHANNELS, PCM_BYTES_PER_FRAME, PCMBuffer, SAMPLE_RATE
 
 INPUT_CHANNELS = ("microphone", "aux1", "aux2", "aux3", "aux4", "aux5")
 INPUT_LABELS = {"microphone": "Microfone", **{f"aux{i}": f"Auxiliar {i}" for i in range(1, 6)}}
+INPUT_PUMP_MAX_MS = 15
 _SAMPLE_BYTES = {
     QAudioFormat.UInt8: 1,
     QAudioFormat.Int16: 2,
@@ -156,6 +157,7 @@ class AudioInputController(QObject):
         super().__init__(parent)
         self.broadcast = broadcast
         self.active: dict[str, dict] = {}
+        self._pump_rotation = 0
         self.input_device_keys = {channel: "" for channel in INPUT_CHANNELS}
         self.monitor_device_key = ""
         self.monitor_enabled = True
@@ -323,12 +325,27 @@ class AudioInputController(QObject):
             self.status_changed.emit(channel, f"Captura parou: {message}")
 
     def _pump(self):
-        for channel, item in tuple(self.active.items()):
+        active_items = tuple(self.active.items())
+        if active_items:
+            start = self._pump_rotation % len(active_items)
+            active_items = active_items[start:] + active_items[:start]
+            self._pump_rotation = (start + 1) % len(active_items)
+        pump_deadline = time.monotonic() + INPUT_PUMP_MAX_MS / 1000
+        for channel, item in active_items:
+            if time.monotonic() >= pump_deadline:
+                break
             try:
                 available = item["io"].bytesAvailable()
                 if available <= 0:
                     continue
-                raw = bytes(item["io"].read(min(available, 262144)))
+                audio_format = item["format"]
+                max_chunk = max(
+                    item["input_frame_bytes"],
+                    audio_format.sampleRate() * audio_format.channelCount()
+                    * _SAMPLE_BYTES[audio_format.sampleFormat()]
+                    * INPUT_PUMP_MAX_MS // 1000,
+                )
+                raw = bytes(item["io"].read(min(available, max_chunk)))
                 if not raw:
                     continue
                 item["raw_pending"].extend(raw)

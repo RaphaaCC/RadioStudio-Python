@@ -159,7 +159,7 @@ class DiscordPresenceTests(unittest.TestCase):
 
         service = QuickDiscordPresenceService(rpc_factory=factory)
         self.addCleanup(service.shutdown)
-        service.configure("123456789012345678", enabled=False)
+        service.configure("123456789012345678", enabled=False, verify=True)
         deadline = time.monotonic() + 2
         while not service.available and time.monotonic() < deadline:
             time.sleep(0.01)
@@ -172,26 +172,59 @@ class DiscordPresenceTests(unittest.TestCase):
 
         service.configure("123456789012345678", enabled=True)
         service.set_activity({"details": "🎵 Faixa de teste"})
-        self.assertTrue(rpc.activity_updated.wait(1))
         deadline = time.monotonic() + 1
-        while (len(rpc.updates) < 2 and time.monotonic() < deadline):
+        while ((len(instances) < 2 or not instances[-1].updates)
+               and time.monotonic() < deadline):
             time.sleep(0.01)
+        self.assertGreaterEqual(len(instances), 2)
+        rpc = instances[-1]
+        self.assertTrue(rpc.activity_updated.is_set())
         self.assertEqual(rpc.updates[-1], {"details": "🎵 Faixa de teste"})
         service.shutdown()
-        self.assertTrue(rpc.closed)
-        self.assertGreaterEqual(rpc.clears, 2)
+        self.assertTrue(all(instance.closed for instance in instances))
+        self.assertGreaterEqual(sum(instance.clears for instance in instances), 2)
+
+    def test_disabled_presence_does_not_connect_until_requested_verification(self):
+        instances = []
+
+        def factory(client_id):
+            rpc = FakeRPC(client_id)
+            instances.append(rpc)
+            return rpc
+
+        service = QuickDiscordPresenceService(rpc_factory=factory)
+        self.addCleanup(service.shutdown)
+        service.configure("123456789012345678", enabled=False)
+        time.sleep(0.05)
+        self.assertEqual(instances, [])
+
+        service.configure("123456789012345678", enabled=False, verify=True)
+        deadline = time.monotonic() + 1
+        while not service.available and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(service.available, service.status)
+        self.assertEqual(len(instances), 1)
+        self.assertTrue(instances[0].closed)
 
     def test_failed_rpc_does_not_report_available(self):
         class BrokenRPC(FakeRPC):
             def connect(self):
                 raise OSError("Discord indisponível")
 
-        service = QuickDiscordPresenceService(rpc_factory=BrokenRPC)
+        instances = []
+
+        def factory(client_id):
+            rpc = BrokenRPC(client_id)
+            instances.append(rpc)
+            return rpc
+
+        service = QuickDiscordPresenceService(rpc_factory=factory)
         self.addCleanup(service.shutdown)
-        service.configure("123456789012345678")
+        service.configure("123456789012345678", verify=True)
         time.sleep(0.05)
         self.assertFalse(service.available)
         self.assertIn("Falha na comunicação", service.status)
+        self.assertEqual(len(instances), 1)
 
     def test_shutdown_during_handshake_does_not_register_late_presence(self):
         connecting = threading.Event()
@@ -210,7 +243,7 @@ class DiscordPresenceTests(unittest.TestCase):
 
         service = QuickDiscordPresenceService(rpc_factory=factory)
         self.addCleanup(service.shutdown)
-        service.configure("123456789012345678")
+        service.configure("123456789012345678", verify=True)
         self.assertTrue(connecting.wait(1), "RPC handshake did not start")
 
         stopper = threading.Thread(target=service.shutdown)

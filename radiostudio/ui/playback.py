@@ -14,6 +14,15 @@ MAX_TRANSITION_ANALYSES = 256
 
 
 class PlaybackMixin:
+    def publish_track_title(self, metadata):
+        title = format_broadcast_title(
+            self.station_metadata["title_format"], metadata, self.station_metadata)
+        publish_track_title = getattr(self.broadcast, "set_track_title", None)
+        if callable(publish_track_title):
+            publish_track_title(title)
+        else:
+            self.broadcast.set_title(title)
+
     def cancel_pending_media_end(self):
         self._media_end_generation = getattr(self, "_media_end_generation", 0) + 1
         self._pending_media_end = None
@@ -130,7 +139,7 @@ class PlaybackMixin:
             return
         self.decoded_audio_sources[player] = (source, decoded_path)
         self.log_event("info", f"Decodificando formato compatível: {Path(source).name}")
-        self.statusBar().showMessage(f"Preparando áudio: {Path(source).name}")
+        self.statusBar().showMessage(translate(f"Preparando áudio: {Path(source).name}"))
         self.broadcast.remove_source("main")
         player.setSource(QUrl.fromLocalFile(decoded_path))
         player.play()
@@ -169,9 +178,10 @@ class PlaybackMixin:
             return
         path = self.tracks[index]
         if not Path(path).is_file():
-            QMessageBox.warning(self, "Arquivo ausente", path)
+            show_warning(self, translate("Arquivo ausente"), path)
             return
 
+        self._autodj_waiting_for_queue = False
         self.cancel_pending_media_end()
         fade_out_duration = self.automatic_fade_out_ms()
         if (not immediate and index != self.current_index and fade_out_duration
@@ -223,11 +233,10 @@ class PlaybackMixin:
         self.pending_track_log = metadata.display_title
         self.on_air.show_track(metadata.display_title, path)
         if self.tray_icon:
-            self.tray_icon.setToolTip(f"{APP_DISPLAY_NAME} — {metadata.display_title[:80]}")
-        self.broadcast.set_title(format_broadcast_title(
-            self.station_metadata["title_format"], metadata, self.station_metadata))
+            self.tray_icon.setToolTip(translate(f"{APP_DISPLAY_NAME} — {metadata.display_title[:80]}"))
+        self.publish_track_title(metadata)
         self.playlist.selectRow(index)
-        self.statusBar().showMessage(f"Reproduzindo: {path}")
+        self.statusBar().showMessage(translate(f"Reproduzindo: {path}"))
         self.player.play()
         self.apply_pending_resume_position()
 
@@ -272,6 +281,8 @@ class PlaybackMixin:
 
     @guarded
     def stop(self):
+        self._autodj_stop_generation = getattr(self, "_autodj_stop_generation", 0) + 1
+        self._autodj_waiting_for_queue = False
         self.cancel_transition_action()
         self.stop_pending = False
         self.cancel_mix()
@@ -290,6 +301,7 @@ class PlaybackMixin:
 
     @guarded
     def finish_stop(self):
+        self._autodj_waiting_for_queue = False
         self.cancel_pending_media_end()
         self.cancel_transition_action()
         self.stop_pending = False
@@ -347,6 +359,14 @@ class PlaybackMixin:
             self.fill_autodj_queue(force=True, allow_current_repeat=True)
             if self.current_index < 0 and self.pending_track_log:
                 return
+        if (self.autodj_config.get("enabled")
+                and self.current_index + 1 >= len(self.tracks)
+                and getattr(self, "_autodj_fill_worker", None) is not None):
+            # Queue generation now runs on a worker. At natural track end,
+            # wait for its result instead of stopping playback before a row
+            # can be appended.
+            self._autodj_waiting_for_queue = True
+            return
         if self.current_index + 1 < len(self.tracks):
             next_index = self.current_index + 1
             fade_out_duration = self.automatic_fade_out_ms()
@@ -373,7 +393,7 @@ class PlaybackMixin:
                         self.player, source, decoded, error)):
                 if self.audio_decode_fallback.is_pending(self.player):
                     self.log_event("info", f"Preparando áudio para compatibilidade: {Path(path).name}")
-                    self.statusBar().showMessage(f"Preparando áudio: {Path(path).name}")
+                    self.statusBar().showMessage(translate(f"Preparando áudio: {Path(path).name}"))
                 return
             self.handle_invalid_main_media(path)
         elif status in (QMediaPlayer.LoadedMedia, QMediaPlayer.BufferedMedia):
@@ -397,7 +417,7 @@ class PlaybackMixin:
         message = f"Não foi possível reproduzir: {path or 'arquivo desconhecido'}"
         if fallback_error:
             message += f" ({fallback_error})"
-        self.statusBar().showMessage(message)
+        self.statusBar().showMessage(translate(message))
         self.log_event("error", message)
         self.last_playback["was_playing"] = False
         if not self.is_quitting:
@@ -591,25 +611,41 @@ class PlaybackMixin:
             else:
                 self.mix_gain = gain
                 self.mix_audio.setVolume(
-                    self.master_volume * gain * getattr(self, "music_duck_gain", 1.0))
+                    self.monitor_output_gain() * gain
+                    * getattr(self, "music_duck_gain", 1.0))
             if progress >= 1.0:
                 del self.gain_ramps[channel]
         if not self.gain_ramps:
             self.gain_timer.stop()
 
     @guarded
-    def set_master_volume(self, value):
-        self.master_volume = value / 100
-        self.audio_input_controller.set_monitor_gain(self.master_volume)
+    def set_master_live_volume(self, value):
+        self.master_live_volume = value / 100
+        self.broadcast.set_master_gain(self.master_live_volume)
+        self.apply_monitor_output_gains()
+
+    @guarded
+    def set_monitor_volume(self, value):
+        self.monitor_volume = value / 100
+        self.apply_monitor_output_gains()
+
+    def monitor_output_gain(self):
+        return max(0.0, min(1.0, self.master_live_volume * self.monitor_volume))
+
+    @guarded
+    def apply_monitor_output_gains(self):
+        monitor_gain = self.monitor_output_gain()
         self.apply_main_volume()
         self.mix_audio.setVolume(
-            self.master_volume * self.mix_gain * getattr(self, "music_duck_gain", 1.0))
+            monitor_gain * self.mix_gain * getattr(self, "music_duck_gain", 1.0))
         self.apply_cart_local_volume()
+        self.audio_input_controller.set_monitor_gain(monitor_gain)
 
     @guarded
     def apply_main_volume(self):
         self.audio.setVolume(
-            self.master_volume * self.main_gain * getattr(self, "music_duck_gain", 1.0))
+            self.monitor_output_gain() * self.main_gain
+            * getattr(self, "music_duck_gain", 1.0))
 
     @guarded
     def maybe_start_mix(self):
@@ -787,8 +823,7 @@ class PlaybackMixin:
         except Exception:
             _logger.exception("Falha ao promover a fonte de áudio do Mix")
             self.log_event("error", "A faixa mudou, mas houve uma falha ao atualizar a fonte da transmissão.")
-        self.broadcast.set_title(format_broadcast_title(
-            self.station_metadata["title_format"], metadata, self.station_metadata))
+        self.publish_track_title(metadata)
         self.log_event("music", metadata.display_title)
         self.record_track_started(metadata.path)
         self.pending_track_log = None
@@ -862,7 +897,7 @@ class PlaybackMixin:
     def update_position(self, value):
         if not self.position.isSliderDown():
             self.position.setValue(value)
-        self.position_label.setText(f"{clock_text(value)} / {clock_text(self.player.duration())}")
+        self.position_label.setText(translate(f"{clock_text(value)} / {clock_text(self.player.duration())}"))
         self.on_air.set_progress(value, self.player.duration())
         self.maybe_start_mix()
         if (not self.is_quitting and self.player.playbackState() == QMediaPlayer.PlayingState

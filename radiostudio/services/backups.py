@@ -370,40 +370,46 @@ def import_backup(backup_file: Path, state_file: Path, database_file: Path,
                   recovery_root: Path) -> ImportResult:
     state_file = Path(state_file)
     database_file = Path(database_file)
-    recovery_directory = preserve_profile(state_file, database_file, recovery_root)
     restored_database = False
+    recovery_directory = None
+    state_stage = database_stage = None
     try:
         with _validated_backup(backup_file) as (state, database, _manifest):
+            # Validate the full archive before copying the current database to
+            # recovery. Invalid or corrupt ZIPs must not cause a potentially
+            # large, pointless SQLite snapshot on every rejected import.
+            recovery_directory = preserve_profile(state_file, database_file, recovery_root)
             state_file.parent.mkdir(parents=True, exist_ok=True)
             state_stage = state_file.with_name(state_file.name + ".import.tmp")
+            database_stage = database_file.with_name(database_file.name + ".import.tmp")
             state_stage.write_bytes(state)
-            database_stage = None
             if database is not None:
                 database_file.parent.mkdir(parents=True, exist_ok=True)
-                database_stage = database_file.with_name(database_file.name + ".import.tmp")
                 _snapshot_database(database, database_stage)
 
-            if database_stage is not None:
-                _remove_database_sidecars(database_file)
-                os.replace(database_stage, database_file)
-                restored_database = True
-            os.replace(state_stage, state_file)
-        return ImportResult(recovery_directory, restored_database)
-    except Exception as exc:
-        try:
-            restore_preserved_profile(recovery_directory, state_file, database_file)
-        except Exception as rollback_error:
-            raise BackupError(
-                f"A importação falhou ({exc}) e a restauração automática também falhou "
-                f"({rollback_error}). Os dados anteriores foram preservados em "
-                f"{recovery_directory}.") from exc
-        if isinstance(exc, BackupError):
-            raise
-        raise BackupError(f"A importação falhou; os dados atuais foram restaurados: {exc}") from exc
+            try:
+                if database is not None:
+                    _remove_database_sidecars(database_file)
+                    os.replace(database_stage, database_file)
+                    restored_database = True
+                os.replace(state_stage, state_file)
+            except Exception as exc:
+                try:
+                    restore_preserved_profile(recovery_directory, state_file, database_file)
+                except Exception as rollback_error:
+                    raise BackupError(
+                        f"A importação falhou ({exc}) e a restauração automática também falhou "
+                        f"({rollback_error}). Os dados anteriores foram preservados em "
+                        f"{recovery_directory}.") from exc
+                if isinstance(exc, BackupError):
+                    raise
+                raise BackupError(
+                    f"A importação falhou; os dados atuais foram restaurados: {exc}") from exc
+            return ImportResult(recovery_directory, restored_database)
     finally:
-        for staged in (state_file.with_name(state_file.name + ".import.tmp"),
-                       database_file.with_name(database_file.name + ".import.tmp")):
-            staged.unlink(missing_ok=True)
+        for staged in (state_stage, database_stage):
+            if staged is not None:
+                staged.unlink(missing_ok=True)
 
 
 def _salvage_database(source: Path, target: Path) -> tuple[int, list[str]]:

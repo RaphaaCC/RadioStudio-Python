@@ -5,19 +5,28 @@ import os
 
 from ._shared import *
 from ..runtime_safety import guarded
+from ..i18n import translate
+from .icons import ui_icon
 
 
 class EventLogMixin:
     @guarded
     def append_event_row(self, timestamp: str, kind: str, message: str):
-        icons = {"music": "🎵", "connected": "📡", "disconnected": "🔌", "error": "⚠️"}
+        display_message = translate(message)
         if self.event_log.rowCount() >= MAX_LOG_ROWS:
             self.event_log.removeRow(0)
         row = self.event_log.rowCount()
         self.event_log.insertRow(row)
-        for column, value in enumerate((timestamp[11:19], f"{icons.get(kind, '•')} {message}")):
+        for column, value in enumerate((timestamp[11:19], display_message)):
             item = QTableWidgetItem(value)
-            item.setToolTip(f"{timestamp}\n{message}")
+            if column == 1:
+                if kind == "music":
+                    item.setIcon(ui_icon("autodj"))
+                elif kind in {"connected", "disconnected"}:
+                    item.setIcon(ui_icon("broadcast"))
+                elif kind == "error":
+                    item.setIcon(ui_icon("warning"))
+            item.setToolTip(translate(f"{timestamp}\n{display_message}"))
             item.setData(Qt.UserRole, kind)
             self.color_event_item(item, kind)
             self.event_log.setItem(row, column, item)
@@ -90,4 +99,4 @@ class EventLogMixin:
         except OSError:
             logging.getLogger("radiostudio").exception(
                 "Não foi possível gravar o histórico de eventos")
-            self.statusBar().showMessage("Não foi possível gravar o histórico no disco")
+            self.statusBar().showMessage(translate("Não foi possível gravar o histórico no disco"))

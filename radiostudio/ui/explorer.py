@@ -19,7 +19,7 @@ class ExplorerMixin:
     def open_explorer_folder(self, path, persist=False):
         folder = Path(path).expanduser()
         if not folder.is_dir():
-            QMessageBox.warning(self, "Pasta", f"Pasta não encontrada: {path}")
+            show_warning(self, translate("Pasta"), translate(f"Pasta não encontrada: {path}"))
             return
         folder = folder.resolve()
         signals_blocked = self.explorer.blockSignals(True)
@@ -58,7 +58,7 @@ class ExplorerMixin:
     @guarded
     def choose_explorer_folder(self):
         folder = QFileDialog.getExistingDirectory(
-            self, "Escolher pasta de músicas", self.explorer_folder or str(Path.home()))
+            self, translate("Escolher pasta de músicas"), self.explorer_folder or str(Path.home()))
         if folder:
             self.open_explorer_folder(folder, persist=True)
 
@@ -113,7 +113,7 @@ class ExplorerMixin:
         for row in range(self.file_model.rowCount(QModelIndex())):
             self.explorer.expand(self.file_model.index(row, 0, QModelIndex()))
         self.explorer_folder = ""
-        self.explorer_path.setText("")
+        self.explorer_path.setText(translate(""))
         self.save_state()
 
     @guarded

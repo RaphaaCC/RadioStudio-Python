@@ -23,13 +23,29 @@ def active_program(programs, now: datetime | None = None):
     for index, block in enumerate(programs or []):
         if not isinstance(block, dict):
             continue
-        if not block.get("enabled", True):
+        enabled_value = block.get("enabled", True)
+        if isinstance(enabled_value, bool):
+            enabled = enabled_value
+        elif type(enabled_value) is int and enabled_value in (0, 1):
+            enabled = bool(enabled_value)
+        else:
+            enabled = False
+        if not enabled:
             continue
         raw_days = block.get("days", [])
         if not isinstance(raw_days, (list, tuple, set)):
             continue
-        days = {int(day) for day in raw_days
-                if str(day).lstrip("-").isdigit() and 0 <= int(day) < 7}
+        days = set()
+        for raw_day in raw_days:
+            try:
+                day_text = str(raw_day)
+                if not day_text.lstrip("-").isdigit():
+                    continue
+                day = int(day_text)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if 0 <= day < 7:
+                days.add(day)
         start = _minute(block.get("start", "00:00"))
         end = _minute(block.get("end", "00:00"))
         if start is None or end is None or start == end:
@@ -68,7 +84,10 @@ def program_signature(program):
 def _artist_key(track) -> str:
     if not isinstance(track, dict):
         return ""
-    return str(track.get("artist") or track.get("albumartist") or "").strip().casefold()
+    artist = str(track.get("artist") or "").strip()
+    if not artist:
+        artist = str(track.get("albumartist") or "").strip()
+    return artist.casefold()
 
 
 def reserve_track(history, track, *, now=None) -> None:
@@ -119,8 +138,8 @@ def filter_tracks(tracks, filters):
         track_genres = {genre.casefold() for genre in _tokens(track.get("genre", ""))}
         if genre_set and not (genre_set & track_genres):
             continue
-        artist = str(track.get("artist", "")).casefold()
-        album_artist = str(track.get("albumartist", "")).casefold()
+        artist = str(track.get("artist", "")).strip().casefold()
+        album_artist = str(track.get("albumartist", "")).strip().casefold()
         if artists and artist not in artists and album_artist not in artists:
             continue
         searchable = "\n".join(str(track.get(field, "")) for field in fields).casefold()

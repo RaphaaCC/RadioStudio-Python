@@ -40,6 +40,8 @@ def _app_data_dir() -> Path:
 
 APP_DIR = _app_data_dir()
 STATE_FILE = APP_DIR / "state.json"
+LANGUAGE_FILE = APP_DIR / "language.cfg"
+INSTALL_LANGUAGE_FILE = Path(sys.executable).resolve().parent / "language.cfg"
 MUSIC_LIBRARY_FILE = APP_DIR / "music_library.sqlite3"
 AUDIO_EXTENSIONS = {
     ".mp2", ".mp3", ".wav", ".flac", ".ogg", ".opus", ".m4a", ".m4b",

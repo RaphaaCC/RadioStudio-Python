@@ -180,7 +180,7 @@ class PlaylistMixin:
 
     @guarded
     def add_files(self):
-        paths, _ = QFileDialog.getOpenFileNames(self, "Adicionar áudio", "", AUDIO_FILTER)
+        paths, _ = QFileDialog.getOpenFileNames(self, translate("Adicionar áudio"), "", translate(AUDIO_FILTER))
         self.add_audio_paths(paths)
 
     @guarded
@@ -208,7 +208,7 @@ class PlaylistMixin:
         if self.current_index < 0:
             self.playlist.selectRow(row)
         self.save_state()
-        self.statusBar().showMessage(f"{len(valid)} áudio(s) adicionado(s) à Now Playing")
+        self.statusBar().showMessage(translate(f"{len(valid)} áudio(s) adicionado(s) à Now Playing"))
 
     @guarded
     def playlist_menu(self, point):
@@ -216,9 +216,9 @@ class PlaylistMixin:
         if row >= 0:
             self.playlist.selectRow(row)
         menu = QMenu(self)
-        preview_action = menu.addAction("Pré-escutar")
+        preview_action = menu.addAction(translate("Pré-escutar"))
         preview_action.setEnabled(row >= 0)
-        stop_action = menu.addAction("Parar escuta")
+        stop_action = menu.addAction(translate("Parar escuta"))
         stop_action.setEnabled(self.preview_player.playbackState() != QMediaPlayer.StoppedState)
         chosen = menu.exec(self.playlist.viewport().mapToGlobal(point))
         if chosen == preview_action:
@@ -228,17 +228,17 @@ class PlaylistMixin:
 
     @guarded
     def add_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Adicionar pasta")
+        folder = QFileDialog.getExistingDirectory(self, translate("Adicionar pasta"))
         if not folder:
             return
         if getattr(self, "_folder_scan_running", False):
-            self.statusBar().showMessage("Já há uma pasta sendo examinada")
+            self.statusBar().showMessage(translate("Já há uma pasta sendo examinada"))
             return
         self._folder_scan_running = True
         worker = _FolderScanWorker(folder)
         self._folder_scan_worker = worker
         worker.signals.finished.connect(self._folder_scan_finished)
-        self.statusBar().showMessage("Localizando arquivos de áudio em segundo plano…")
+        self.statusBar().showMessage(translate("Localizando arquivos de áudio em segundo plano…"))
         QThreadPool.globalInstance().start(worker, priority=-1)
 
     @guarded
@@ -259,11 +259,11 @@ class PlaylistMixin:
                    if added else "Nenhum áudio compatível encontrado na pasta")
         if errors:
             message += f" · {errors} erro(s) de leitura ignorado(s)"
-        self.statusBar().showMessage(message)
+        self.statusBar().showMessage(translate(message))
 
     @guarded
     def open_m3u(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Abrir playlist", "", "Playlist (*.m3u *.m3u8)")
+        path, _ = QFileDialog.getOpenFileName(self, translate("Abrir playlist"), "", translate("Playlist (*.m3u *.m3u8)"))
         if not path:
             return
         self.cancel_pending_transition()
@@ -278,7 +278,7 @@ class PlaylistMixin:
 
     @guarded
     def save_m3u(self):
-        path, _ = QFileDialog.getSaveFileName(self, "Salvar playlist", "playlist.m3u8", "Playlist (*.m3u8 *.m3u)")
+        path, _ = QFileDialog.getSaveFileName(self, translate("Salvar playlist"), "playlist.m3u8", translate("Playlist (*.m3u8 *.m3u)"))
         if path:
             Path(path).write_text("#EXTM3U\n" + "\n".join(self.tracks) + "\n", encoding="utf-8")
 

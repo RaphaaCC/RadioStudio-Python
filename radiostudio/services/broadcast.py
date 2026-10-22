@@ -452,28 +452,82 @@ class RemoteSink:
     def __init__(self, profile: dict, password: str):
         self.profile, self.password = profile, password
         self.sock = None
+        self._socket_lock = threading.Lock()
+        self._connection_generation = 0
+        self._connecting = False
+
+    @staticmethod
+    def _abort_socket(sock) -> None:
+        if sock is None:
+            return
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+    def _track_connect_socket(self, generation: int, sock) -> bool:
+        with self._socket_lock:
+            if generation != self._connection_generation:
+                return False
+            self.sock = sock
+            return True
+
+    def _finish_failed_connect(self, generation: int, sock) -> None:
+        with self._socket_lock:
+            if generation == self._connection_generation:
+                self._connecting = False
+                if self.sock is sock:
+                    self.sock = None
+        self._abort_socket(sock)
 
     def connect(self):
         profile = self.profile
-        sock = socket.create_connection((profile["host"], int(profile["port"])), timeout=8)
+        host = str(profile.get("host") or "").strip()
+        if host.startswith("[") and host.endswith("]"):
+            host = host[1:-1]
+        port = int(profile["port"])
+        with self._socket_lock:
+            self._connection_generation += 1
+            generation = self._connection_generation
+            self._connecting = True
+            previous_sock, self.sock = self.sock, None
+        self._abort_socket(previous_sock)
+        sock = None
+        stage = "conectar ao servidor"
         try:
+            sock = socket.create_connection((host, port), timeout=8)
+            if not self._track_connect_socket(generation, sock):
+                raise ConnectionError("Tentativa de conexão cancelada")
             if profile.get("tls"):
-                sock = ssl.create_default_context().wrap_socket(sock, server_hostname=profile["host"])
+                stage = "negociar TLS/SSL"
+                secure_sock = ssl.create_default_context().wrap_socket(
+                    sock, server_hostname=host)
+                sock = secure_sock
+                if not self._track_connect_socket(generation, sock):
+                    raise ConnectionError("Tentativa de conexão cancelada")
             sock.settimeout(8)
             if profile["kind"] == "icecast":
+                stage = "enviar a solicitação ao Icecast"
                 mount = "/" + profile["mount"].lstrip("/")
                 auth = base64.b64encode(f"{profile.get('user') or 'source'}:{self.password}".encode()).decode()
+                host_header = f"[{host}]" if ":" in host else host
+                clean_header = lambda value: str(value or "").replace("\r", " ").replace("\n", " ").strip()
                 headers = [f"PUT {quote(mount, safe='/')} HTTP/1.1",
-                           f"Host: {profile['host']}:{profile['port']}",
+                           f"Host: {host_header}:{port}",
                            f"Authorization: Basic {auth}", "Content-Type: audio/mpeg",
                            "Expect: 100-continue", "Connection: keep-alive",
-                           f"Ice-Name: {profile.get('station', '')}",
-                           f"Ice-Genre: {profile.get('genre', '')}",
-                           f"Ice-URL: {profile.get('url', '')}",
-                           f"Ice-Description: {profile.get('description', '')}", "", ""]
+                           f"Ice-Name: {clean_header(profile.get('station'))}",
+                           f"Ice-Genre: {clean_header(profile.get('genre'))}",
+                           f"Ice-URL: {clean_header(profile.get('url'))}",
+                           f"Ice-Description: {clean_header(profile.get('description'))}", "", ""]
                 sock.sendall("\r\n".join(headers).encode("utf-8"))
                 response = b""
                 accepted = False
+                stage = "aguardar autenticação do Icecast"
                 while len(response) < 8192:
                     while b"\r\n\r\n" not in response and len(response) < 8192:
                         chunk = sock.recv(1024)
@@ -492,7 +546,7 @@ class RemoteSink:
                     # Icecast 2.4.x does not accept chunked PUT bodies. The
                     # source protocol used by FFmpeg sends Expect: 100-continue
                     # and then raw MP3 bytes, without HTTP chunk framing.
-                    if status_code == 100 or status_code in (200, 201):
+                    if status_code == 100 or 200 <= status_code < 300:
                         accepted = True
                         break
                     if 100 <= status_code < 200:
@@ -504,8 +558,10 @@ class RemoteSink:
                 # DNAS >=2.4.7 maps legacy sources to a stream with password:#SID.
                 stream_id = int(profile.get("stream_id", 1))
                 source_password = self.password if stream_id == 1 else f"{self.password}:#{stream_id}"
+                stage = "enviar a senha de origem SHOUTcast"
                 sock.sendall((source_password + "\n").encode("utf-8"))
                 response = bytearray()
+                stage = "aguardar autenticação do SHOUTcast"
                 while len(response) < 1024 and not response.endswith(b"\n"):
                     chunk = sock.recv(1)
                     if not chunk:
@@ -518,17 +574,41 @@ class RemoteSink:
                            f"icy-genre:{profile.get('genre', '')}",
                            f"icy-url:{profile.get('url', '')}",
                            f"icy-br:{profile.get('bitrate', 128)}", "icy-pub:0", ""]
+                stage = "enviar os metadados SHOUTcast"
                 sock.sendall(("\n".join(headers) + "\n").encode("utf-8"))
             else:
                 raise ValueError("Protocolo de transmissão desconhecido")
             sock.settimeout(10)
-            self.sock = sock
+            with self._socket_lock:
+                if (generation != self._connection_generation or self.sock is not sock
+                        or not self._connecting):
+                    raise ConnectionError("Tentativa de conexão cancelada")
+                self._connecting = False
+        except TimeoutError as exc:
+            self._finish_failed_connect(generation, sock)
+            logging.getLogger("radiostudio").warning(
+                "Tempo esgotado ao %s para o perfil de transmissão %s",
+                stage, profile.get("name", "sem nome"))
+            raise TimeoutError(
+                "Tempo esgotado ao conectar ao servidor de transmissão.") from exc
         except Exception:
-            sock.close()
+            self._finish_failed_connect(generation, sock)
             raise
 
+    def cancel_connect(self) -> bool:
+        """Interrupt a pending handshake without affecting an active stream."""
+        with self._socket_lock:
+            if not self._connecting:
+                return False
+            self._connection_generation += 1
+            self._connecting = False
+            sock, self.sock = self.sock, None
+        self._abort_socket(sock)
+        return True
+
     def publish(self, data: bytes):
-        sock = self.sock
+        with self._socket_lock:
+            sock = self.sock
         if sock is None:
             raise ConnectionError("Conexão de transmissão encerrada")
         if self.profile["kind"] == "icecast":
@@ -537,9 +617,16 @@ class RemoteSink:
             sock.sendall(data)
 
     def close(self, graceful: bool = True):
-        sock, self.sock = self.sock, None
+        with self._socket_lock:
+            was_connecting = self._connecting
+            self._connection_generation += 1
+            self._connecting = False
+            sock, self.sock = self.sock, None
         if sock:
-            if graceful and self.profile["kind"] == "icecast":
+            if was_connecting or not graceful:
+                self._abort_socket(sock)
+                return
+            if self.profile["kind"] == "icecast":
                 try:
                     # The request body is a live, unframed MP3 stream.
                     # Half-close it cleanly; there is no chunk terminator.
@@ -547,10 +634,8 @@ class RemoteSink:
                 except OSError:
                     graceful = False
             if not graceful:
-                try:
-                    sock.shutdown(socket.SHUT_RDWR)
-                except OSError:
-                    pass
+                self._abort_socket(sock)
+                return
             try:
                 sock.close()
             except OSError:
@@ -722,7 +807,11 @@ class EncoderOutput:
             if not first_attempt:
                 self._discard_queued_pcm()
             self.connection_failed.clear()
-            self._status("Conectando" if first_attempt else "Reconectando")
+            # Keep the last failure visible while the next attempt is in
+            # progress; otherwise the cause disappears during a long timeout.
+            retry_error = "" if first_attempt else self.error
+            self._status("Conectando" if first_attempt else "Reconectando",
+                         retry_error)
             try:
                 self.destination.connect() if isinstance(self.destination, RemoteSink) else None
                 if self.stop_event.is_set():
@@ -754,6 +843,11 @@ class EncoderOutput:
                     try:
                         data = self.queue.get(timeout=0.2)
                     except queue.Empty:
+                        # A socket or encoder-reader failure terminates this
+                        # FFmpeg process from another thread. Prefer that
+                        # original failure over reporting its expected exit.
+                        if self.connection_failed.is_set():
+                            raise ConnectionError(self.error or "Conexão encerrada")
                         if self.process.poll() is not None:
                             raise RuntimeError("Codificador MP3 encerrou")
                         continue
@@ -763,7 +857,9 @@ class EncoderOutput:
                     raise ConnectionError(self.error or "Conexão encerrada")
             except Exception as exc:
                 if not self.stop_event.is_set():
-                    self._status("Reconectando", str(exc))
+                    error = (self.error if self.connection_failed.is_set() and self.error
+                             else str(exc))
+                    self._status("Reconectando", error)
             finally:
                 self._close_connection()
             first_attempt = False
@@ -851,6 +947,8 @@ class EncoderOutput:
 
     def stop(self):
         self.stop_event.set()
+        if isinstance(self.destination, RemoteSink):
+            self.destination.cancel_connect()
         process = self.process
         if process:
             try:
@@ -869,17 +967,111 @@ class BroadcastManager:
         self.mixer_thread = None
         self.stop_event = threading.Event()
         self.title = ""
+        self.master_gain = 1.0
         self.cover_art_data: bytes | None = None
         self.cover_art_mime_type = ""
         self.profiles = []
         self.startup_errors: dict[str, str] = {}
+        self._metadata_lock = threading.Lock()
+        self._metadata_pending: dict[str, tuple[dict, str]] = {}
+        self._metadata_active: set[str] = set()
+        self.metadata_update_mode = "current"
+        self.metadata_update_interval_seconds = 30
+        self._metadata_schedule_changed = threading.Event()
+        self._metadata_stop_event = threading.Event()
+        self._metadata_scheduler_thread = None
 
     @property
     def running(self) -> bool:
         return bool(self.outputs)
 
+    @property
+    def recording(self):
+        return getattr(self, "recording_session", None)
+
+    @property
+    def recording_active(self) -> bool:
+        session = self.recording
+        return bool(session and session.active)
+
+    @property
+    def audio_bus_active(self) -> bool:
+        thread = self.mixer_thread
+        return bool((self.running or self.recording_active) and thread
+                    and thread.is_alive() and not self.stop_event.is_set())
+
+    def _ensure_mixer(self):
+        self.stop_event.clear()
+        if not self.mixer_thread or not self.mixer_thread.is_alive():
+            self.mixer_thread = threading.Thread(target=self._mix_loop, daemon=True,
+                                                 name="RadioStudioAudioMixer")
+            self.mixer_thread.start()
+
+    def start_recording(self, directory, format_name="mp3", bitrate=192):
+        """Record the final limited program bus without enabling transmission."""
+        session = self.recording
+        if session and session.busy:
+            return None
+        from .recording import RecordingSession
+
+        session = RecordingSession(directory, format_name, bitrate)
+        self.recording_session = session
+        session.start()
+        try:
+            self._ensure_mixer()
+        except Exception:
+            session.stop()
+            self.recording_session = None
+            raise
+        return session.session_id
+
+    def pause_recording(self) -> bool:
+        session = self.recording
+        return bool(session and session.pause())
+
+    def resume_recording(self) -> bool:
+        session = self.recording
+        return bool(session and session.resume())
+
+    def stop_recording(self, session_id: str | None = None, *, wait: bool = False) -> bool:
+        session = self.recording
+        if not session or (session_id is not None and session.session_id != session_id):
+            return False
+        if wait:
+            stopped = session.stop()
+        else:
+            stopped = session.request_stop()
+        self._stop_mixer_if_idle()
+        return stopped
+
+    def _stop_mixer_if_idle(self):
+        if self.running or self.recording_active:
+            return
+        self.stop_event.set()
+        thread = self.mixer_thread
+        with self.sources_lock:
+            self.sources.clear()
+        if thread and thread is not threading.current_thread():
+            thread.join(timeout=2)
+        # The mixer can request its own shutdown after an asynchronous
+        # recording failure. Keep its reference until it actually exits: a
+        # new recording may clear stop_event in the meantime, and _ensure_mixer
+        # must reuse this live thread instead of launching a second mixer.
+        if (thread is None or not thread.is_alive()) and self.mixer_thread is thread:
+            self.mixer_thread = None
+
+    def _publish_mix_frame(self, pcm: bytes):
+        self._feed_outputs(pcm)
+        session = self.recording
+        if session and session.active:
+            session.submit(pcm)
+        elif session and not session.busy and not self.running:
+            # An asynchronous encoder/disk failure must not leave an idle
+            # record-only mixer spinning after its writer has exited.
+            self._stop_mixer_if_idle()
+
     def push_audio(self, source: str, data: bytes, gain: float = 1.0):
-        if not self.running or not data:
+        if not (self.running or self.recording_active) or not data:
             return
         with self.sources_lock:
             if source not in self.sources:
@@ -887,6 +1079,13 @@ class BroadcastManager:
             buffer, _ = self.sources[source]
             self.sources[source] = (buffer, gain)
         buffer.append(data, gain)
+
+    def set_master_gain(self, gain: float):
+        """Set the program-bus gain applied to every source before transmission."""
+        try:
+            self.master_gain = max(0.0, min(1.0, float(gain)))
+        except (TypeError, ValueError, OverflowError):
+            self.master_gain = 1.0
 
     def remove_source(self, source: str):
         with self.sources_lock:
@@ -993,10 +1192,14 @@ class BroadcastManager:
             if not started:
                 details = "; ".join(output.error for output in targets if output.error)
                 raise RuntimeError(details or "Nenhuma saída conseguiu iniciar")
-            self.mixer_thread = threading.Thread(target=self._mix_loop, daemon=True)
-            self.mixer_thread.start()
+            self._ensure_mixer()
+            if self.title:
+                for profile in tuple(self.profiles):
+                    self._queue_metadata_update(profile, self.title)
+            if self.metadata_update_mode == "interval":
+                self._start_metadata_scheduler()
         except Exception:
-            self.stop()
+            self.stop_transmission()
             raise
 
     def _mix_loop(self):
@@ -1005,7 +1208,7 @@ class BroadcastManager:
             mixed = self._mix_source_samples()
             pcm = (SILENCE_PCM_FRAME if mixed is None else
                    array("h", (max(-32768, min(32767, value)) for value in mixed)).tobytes())
-            self._feed_outputs(pcm)
+            self._publish_mix_frame(pcm)
             deadline += FRAME_MS / 1000
             self.stop_event.wait(max(0, deadline - time.monotonic()))
             if time.monotonic() - deadline > 0.5:
@@ -1013,6 +1216,7 @@ class BroadcastManager:
 
     def _mix_source_samples(self):
         """Mix active sources; return None when the full frame is silence."""
+        master_gain = self.master_gain
         with self.sources_lock:
             sources = list(self.sources.items())
         mixed = None
@@ -1034,6 +1238,7 @@ class BroadcastManager:
                         samples = array("h")
                         samples.frombytes(data)
                         segment_gain = gain if captured_gain is None else captured_gain
+                        segment_gain *= master_gain
                         for sample in samples:
                             if sample_offset >= len(mixed):
                                 raise ValueError("A fonte retornou um quadro PCM grande demais")
@@ -1049,7 +1254,7 @@ class BroadcastManager:
                     if mixed is None:
                         mixed = [0] * (PCM_BYTES_PER_FRAME // 2)
                     for index, sample in enumerate(samples):
-                        mixed[index] += int(sample * gain)
+                        mixed[index] += int(sample * gain * master_gain)
             except Exception:
                 with self.sources_lock:
                     current = self.sources.get(source_name)
@@ -1086,38 +1291,140 @@ class BroadcastManager:
                         logging.getLogger("radiostudio").exception(
                             "Falha ao isolar a saída de áudio")
 
-    def stop(self):
-        self.stop_event.set()
-        for output in self.outputs:
+    def stop_transmission(self):
+        self._metadata_stop_event.set()
+        self._metadata_schedule_changed.set()
+        with self._metadata_lock:
+            self._metadata_pending.clear()
+        outputs, self.outputs = tuple(self.outputs), []
+        local_server, self.local_server = self.local_server, None
+        self.profiles = []
+        self.startup_errors = {}
+        for output in outputs:
             output.stop()
-        if self.mixer_thread:
-            self.mixer_thread.join(timeout=2)
-        for output in self.outputs:
+        if (self._metadata_scheduler_thread
+                and self._metadata_scheduler_thread.is_alive()):
+            self._metadata_scheduler_thread.join(timeout=2)
+        self._metadata_scheduler_thread = None
+        for output in outputs:
             if output.thread and output.thread.is_alive():
                 output.thread.join(timeout=2)
             if output.stats_thread and output.stats_thread.is_alive():
                 output.stats_thread.join(timeout=2)
-        if self.local_server:
-            self.local_server.stop()
-            self.local_server = None
-        self.outputs = []
-        self.profiles = []
-        self.startup_errors = {}
-        with self.sources_lock:
-            self.sources.clear()
+        if local_server:
+            local_server.stop()
+        self._stop_mixer_if_idle()
 
-    def set_title(self, title: str):
-        self.title = title
-        if self.local_server:
-            self.local_server.title = title
-        for profile in self.profiles:
+    def stop(self):
+        """Stop transmission and recording (used for full application shutdown)."""
+        session = self.recording
+        if session:
             try:
-                if get_password(profile["id"] + ":metadata"):
-                    threading.Thread(target=self._send_metadata,
-                                     args=(profile, title), daemon=True).start()
+                self.stop_recording(wait=True)
             except Exception:
                 logging.getLogger("radiostudio").exception(
-                    "Falha ao preparar atualização de metadados para %s", profile.get("name", "perfil"))
+                    "Falha ao finalizar a gravação durante o encerramento")
+        self.stop_transmission()
+
+    def set_title(self, title: str):
+        self._set_local_title(title)
+        if self.metadata_update_mode == "current":
+            self._publish_metadata_title(title)
+
+    def set_track_title(self, title: str):
+        """Update the local title and publish for track-based modes."""
+        self._set_local_title(title)
+        if self.metadata_update_mode in {"current", "track_change"}:
+            self._publish_metadata_title(title)
+
+    def _set_local_title(self, title: str) -> None:
+        self.title = str(title)
+        if self.local_server:
+            self.local_server.title = self.title
+
+    def _publish_metadata_title(self, title: str) -> None:
+        for profile in tuple(self.profiles):
+            self._queue_metadata_update(profile, title)
+
+    def set_metadata_update_preferences(self, mode: str, interval_seconds: int) -> None:
+        valid_modes = {"current", "track_change", "interval"}
+        self.metadata_update_mode = (
+            mode if isinstance(mode, str) and mode in valid_modes else "current")
+        try:
+            interval = int(interval_seconds)
+        except (TypeError, ValueError, OverflowError):
+            interval = 30
+        self.metadata_update_interval_seconds = min(3600, max(5, interval))
+        if self.running and self.metadata_update_mode == "interval":
+            self._start_metadata_scheduler()
+        if self._metadata_scheduler_thread and self._metadata_scheduler_thread.is_alive():
+            self._metadata_schedule_changed.set()
+
+    def _start_metadata_scheduler(self) -> None:
+        if (self._metadata_scheduler_thread
+                and self._metadata_scheduler_thread.is_alive()):
+            self._metadata_schedule_changed.set()
+            return
+        self._metadata_stop_event.clear()
+        self._metadata_schedule_changed.clear()
+        self._metadata_scheduler_thread = threading.Thread(
+            target=self._metadata_schedule_loop, daemon=True,
+            name="broadcast-metadata-scheduler")
+        try:
+            self._metadata_scheduler_thread.start()
+        except RuntimeError:
+            self._metadata_scheduler_thread = None
+            logging.getLogger("radiostudio").exception(
+                "Falha ao iniciar a atualização periódica de metadados")
+
+    def _metadata_schedule_loop(self) -> None:
+        while not self.stop_event.is_set() and not self._metadata_stop_event.is_set():
+            self._metadata_schedule_changed.clear()
+            if self.metadata_update_mode != "interval":
+                self._metadata_schedule_changed.wait()
+                continue
+            interval = self.metadata_update_interval_seconds
+            if self._metadata_schedule_changed.wait(interval):
+                continue
+            if self.stop_event.is_set() or not self.title:
+                continue
+            self._publish_metadata_title(self.title)
+
+    def _queue_metadata_update(self, profile: dict, title: str) -> None:
+        profile_id = str(profile.get("id") or "")
+        if not profile_id:
+            return
+        with self._metadata_lock:
+            self._metadata_pending[profile_id] = (dict(profile), str(title))
+            if profile_id in self._metadata_active:
+                return
+            self._metadata_active.add(profile_id)
+        try:
+            threading.Thread(target=self._drain_metadata_updates,
+                             args=(profile_id,), daemon=True).start()
+        except RuntimeError:
+            with self._metadata_lock:
+                self._metadata_active.discard(profile_id)
+                self._metadata_pending.pop(profile_id, None)
+            logging.getLogger("radiostudio").exception(
+                "Falha ao iniciar atualização de metadados para %s",
+                profile.get("name", "perfil"))
+
+    def _drain_metadata_updates(self, profile_id: str) -> None:
+        while True:
+            with self._metadata_lock:
+                update = self._metadata_pending.pop(profile_id, None)
+                if update is None:
+                    self._metadata_active.discard(profile_id)
+                    return
+            profile, title = update
+            try:
+                if get_password(profile_id + ":metadata"):
+                    self._send_metadata(profile, title)
+            except Exception:
+                logging.getLogger("radiostudio").exception(
+                    "Falha ao enviar atualização de metadados para %s",
+                    profile.get("name", "perfil"))
 
     def set_cover_art(self, data: bytes | None, mime_type: str = ""):
         self.cover_art_data = bytes(data) if data else None

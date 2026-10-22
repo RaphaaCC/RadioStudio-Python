@@ -65,7 +65,7 @@ class BroadcastManager(_BaseBroadcastManager):
                 self.limiter_gain = 1.0
             else:
                 pcm, self.limiter_gain = limit_mixed_samples(mixed, self.limiter_gain)
-            self._feed_outputs(pcm)
+            self._publish_mix_frame(pcm)
             deadline += FRAME_MS / 1000
             self.stop_event.wait(max(0, deadline - time.monotonic()))
             if time.monotonic() - deadline > 0.5:

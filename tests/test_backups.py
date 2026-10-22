@@ -97,6 +97,7 @@ class BackupServiceTests(unittest.TestCase):
 
         self.assertEqual(self.state_file.read_bytes(), original)
         self.assertTrue(self.database_file.is_file())
+        self.assertFalse(self.recovery.exists())
 
     def test_repair_prefers_a_valid_backup_for_a_corrupt_database(self):
         self._backup()

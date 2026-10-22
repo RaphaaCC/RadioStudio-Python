@@ -34,7 +34,7 @@ ROOT = Path(__file__).resolve().parents[1]
 ASSET_DIR = ROOT / "radiostudio" / "assets"
 LOGO_FILE = ASSET_DIR / "logo-about-window.png"
 OUTPUT_FILE = ASSET_DIR / "manual_usuario.pdf"
-VERSION = "v1.0.1 Stable"
+VERSION = "v1.0.2 Beta"
 PAGE_WIDTH, PAGE_HEIGHT = A4
 
 NAVY = colors.HexColor("#071A3D")
@@ -201,7 +201,8 @@ class CoverPage(Flowable):
         canvas.line(30 * mm, PAGE_HEIGHT - 193 * mm, PAGE_WIDTH - 30 * mm, PAGE_HEIGHT - 193 * mm)
         canvas.setFillColor(colors.white)
         canvas.setFont("Vera", 10)
-        canvas.drawString(30 * mm, PAGE_HEIGHT - 205 * mm, "Playlist, AutoDJ, áudio e transmissão")
+        canvas.drawString(30 * mm, PAGE_HEIGHT - 205 * mm,
+                          "Playlist, AutoDJ, gravação e transmissão")
         canvas.setFillColor(colors.HexColor("#B9CBE0"))
         canvas.setFont("Vera", 8.5)
         canvas.drawString(30 * mm, 32 * mm, "Edição em português • Raemi Labs • 2026")
@@ -269,7 +270,7 @@ class ManualDocTemplate(BaseDocTemplate):
 
 SECTIONS = [
     ("1. Comece por aqui", [
-        ("p", "O RadioStudio Python Sirius reúne uma fila de reprodução, automação de programação musical, entradas de áudio e saídas de transmissão. Este manual descreve a versão v1.0.1 Stable, cuja interface está disponível somente em português."),
+        ("p", "O RadioStudio Python Sirius reúne uma fila de reprodução, automação de programação musical, entradas de áudio, gravações e saídas de transmissão. Este manual descreve a versão v1.0.2 Beta, cuja interface está disponível em sete idiomas."),
         ("callout", ("A reprodução local e o envio à transmissão compartilham o áudio do programa. O controle de volume local ajusta a monitoração no computador e não reduz o sinal transmitido. A pré-escuta usa uma saída separada.", False)),
         ("h2", "Uma rotina simples"),
         ("steps", [
@@ -316,7 +317,7 @@ SECTIONS = [
         ("bullets", [
             "Lateral esquerda: explorador de arquivos e Histórico de eventos.",
             "Centro: fila Now Playing, controles do player e pré-escuta.",
-            "Lateral direita: Agendador, Cart wall, Entradas, Transmissão e AutoDJ.",
+            "Lateral direita: Agendador, Cart wall, Entradas, Transmissão, AutoDJ e Gravação.",
         ]),
     ]),
     ("4. Adicionar músicas ao Now Playing", [
@@ -523,17 +524,21 @@ SECTIONS = [
         ]),
         ("p", "O histórico registra o início real de uma faixa, incluindo faixas adicionadas manualmente, agendadas e pelo AutoDJ. O banco conserva até 50 mil execuções; os metadados são um retrato no momento do início."),
     ]),
-    ("15. Agendar uma música", [
-        ("p", "A aba Agendador agenda um arquivo para uma hora e repetição semanal. Quando o evento vence, o arquivo é inserido logo após a faixa atual e começa a tocar; outros itens futuros da fila permanecem depois dele."),
+    ("15. Agendar faixas e ações", [
+        ("p", "O Agendador executa uma ação em uma data e horário únicos ou em dias da semana escolhidos. A tabela mostra a próxima execução, a ação, o conteúdo e o resultado mais recente."),
         ("steps", [
             "Abra Agendador e pressione Adicionar.",
-            "Use Escolher arquivo para selecionar o áudio.",
-            "Defina o Horário e a repetição: Todos os dias ou um dia específico da semana.",
-            "Deixe Ativo marcado e confirme.",
-            "Para disparar um evento selecionado imediatamente, use Executar agora.",
+            "Escolha a Ação: tocar uma faixa, carregar uma playlist M3U, executar um Cart Wall, controlar a reprodução ou iniciar/parar a transmissão.",
+            "Para uma faixa ou playlist, selecione o arquivo. Uma playlist usa caminhos relativos à pasta do próprio M3U; arquivos ausentes são ignorados.",
+            "Escolha Uma vez e informe a Data, ou escolha Semanal e marque um ou mais Dias da semana. Defina o Horário.",
+            "Em Início da reprodução, escolha No horário agendado para interromper a faixa atual com a transição configurada, ou Após a faixa atual para deixar o item na fila.",
+            "Para playlists, escolha Inserir mantendo a fila, Substituir a fila ou Carregar sem iniciar. O último modo atualiza a fila sem iniciar áudio.",
+            "Deixe Ativo marcado e confirme. Um evento único é desativado depois de executar ou ser perdido; ele permanece visível na tabela.",
+            "Para disparar um evento selecionado imediatamente, use Executar agora. Isso não consome a próxima repetição, exceto quando executado no próprio horário agendado.",
         ]),
-        ("p", "Use Editar para mudar horário, repetição ou arquivo. Excluir remove o evento. Arquivos que não existem no horário previsto são ignorados e registrados no status/histórico."),
-        ("callout", ("O agendamento depende de o RadioStudio estar aberto no horário marcado e de o computador continuar ligado.", True)),
+        ("p", "Eventos de faixa e playlist no mesmo minuto são enfileirados na ordem da tabela. O modo de início do primeiro evento de mídia desse grupo controla se a fila começa imediatamente ou aguarda a faixa atual."),
+        ("p", "Use Editar para alterar o evento e Excluir para removê-lo. Se o programa estiver aberto, uma execução pode atrasar até cinco minutos; depois disso, o evento é registrado como perdido. Eventos que venceram enquanto o programa estava fechado não são executados ao abrir."),
+        ("callout", ("O agendador usa o horário local do computador e só dispara enquanto o RadioStudio está aberto. Uma transmissão iniciada pelo agendador usa os perfis já configurados.", True)),
     ]),
     ("16. Cart wall", [
         ("p", "O Cart wall oferece 25 botões para efeitos, identificações, vinhetas ou outros áudios curtos. Cada botão é independente da playlist."),
@@ -695,8 +700,38 @@ SECTIONS = [
             "Se ocorrer um erro, anote o horário, a ação e a faixa; consulte app.log sem compartilhar senhas ou dados privados.",
         ]),
     ]),
-    ("24. Limites desta versão", [
-        ("p", "Esta edição está disponível somente em português. O envio externo usa codificação MP3; AAC/Opus, proxy e relay de estatísticas, gravação de transmissão e processamento avançado de áudio ainda não estão disponíveis."),
+    ("24. Gravação de transmissão e podcasts", [
+        ("p", "A aba Gravação captura o mix estéreo final do Master Ao Vivo, depois do ganho master e do limiter. A gravação reúne a música, os carts do Cart wall, o microfone e as entradas auxiliares. O programa pode gravar com a transmissão ativa ou parado; gravar não liga o indicador NO AR."),
+        ("h2", "Escolher pasta e formato"),
+        ("bullets", [
+            "A pasta inicial é Música\\RadioStudio Recordings. Use Escolher pasta para selecionar outro destino; a preferência fica salva.",
+            "MP3 é o formato inicial, a 192 kbps. A lista oferece outras taxas de bits para equilibrar tamanho e qualidade.",
+            "WAV grava PCM estéreo, 16 bits e 44,1 kHz, útil para edição posterior de podcasts. O formato pode ocupar muito mais espaço que MP3.",
+            "Cada arquivo recebe data e hora no nome. Se já existir um arquivo com esse nome, o RadioStudio acrescenta um sufixo para não sobrescrevê-lo.",
+        ]),
+        ("h2", "Gravar manualmente"),
+        ("steps", [
+            "Abra a aba Gravação e confira a pasta e o formato escolhidos.",
+            "Pressione Iniciar. A gravação começa mesmo quando a transmissão não está no ar.",
+            "Use Pausar e Retomar para interromper e continuar a mesma sessão, por exemplo durante uma gravação de podcast.",
+            "Pressione Parar gravação para encerrar. Aguarde o estado Gravação finalizada antes de abrir ou mover o arquivo.",
+            "A área de estado mostra duração e caminho do arquivo atual. O arquivo só passa a ter o nome final depois que a codificação termina.",
+        ]),
+        ("h2", "Iniciar junto da transmissão"),
+        ("p", "Marque Iniciar gravação automaticamente ao iniciar a transmissão para ligar essa opção. Ela vem desmarcada. Ao parar a transmissão, o RadioStudio encerra apenas a gravação iniciada por esse início automático; uma gravação manual já em curso continua."),
+        ("h2", "Criar uma agenda"),
+        ("steps", [
+            "Na seção Agendas de gravação, pressione Adicionar.",
+            "Escolha Única para indicar uma data ou Recorrente para marcar um ou mais dias da semana.",
+            "Defina Início e Término e marque Ativa. Horários iguais são inválidos; se Término for anterior a Início, a sessão termina no dia seguinte.",
+            "Pressione OK para salvar. Use Editar ou Excluir para atualizar a tabela.",
+            "Deixe o RadioStudio aberto no horário. As agendas não iniciam gravações retroativas após abrir o programa.",
+        ]),
+        ("p", "Só pode haver uma gravação por vez. Se uma agenda ou o início da transmissão disparar enquanto outra gravação estiver ativa, o novo início será ignorado e aparecerá no Histórico. O término automático de uma agenda para somente a sessão que aquela agenda iniciou; ele não encerra uma gravação manual ou iniciada por outra regra."),
+        ("callout", ("Se o gravador ou o FFmpeg falhar, a transmissão continua. O RadioStudio informa o erro e preserva o arquivo parcial quando possível; confira a pasta escolhida antes de tentar novamente.", True)),
+    ]),
+    ("25. Limites desta versão", [
+        ("p", "A gravação desta versão é um único mix estéreo do Master Ao Vivo; não há gravação multifaixa nem edição de áudio dentro do RadioStudio. A interface está disponível em português, inglês, espanhol, coreano, japonês, chinês tradicional e chinês simplificado."),
         ("p", "O protocolo de fonte SHOUTcast implementado é o legado v1, com suporte à identificação de Stream ID compatível com DNAS 2.4.7 ou mais recente; o protocolo nativo v2 não está implementado. A disponibilidade simultânea de entradas também depende dos drivers e dispositivos do Windows."),
         ("p", "As listas de formatos indicam extensões aceitas pelo seletor, mas o suporte real depende do codec disponível. A Rich Presence depende do Discord instalado, em execução e acessível pelo canal IPC local."),
         ("p", "Relate bugs usando o contato mostrado em Ajuda > Sobre. Inclua versão, horário, ação realizada e mensagens do Histórico. Não envie senhas, tokens ou cópias do seu banco de dados público."),

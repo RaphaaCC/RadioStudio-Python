@@ -5,9 +5,17 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from PySide6.QtMultimedia import QMediaPlayer
+
 from radiostudio.services.autodj import choose_track, program_signature, reserve_track
-from radiostudio.ui.autodj_controller import AutoDJControllerMixin
+from radiostudio.ui.autodj_controller import AutoDJControllerMixin, _AutoDJFillWorker
+from radiostudio.ui.playback import PlaybackMixin
 from radiostudio.ui.persistence import _tuple_tree
+
+
+class _ImmediateThreadPool:
+    def start(self, worker, priority=0):
+        worker.run()
 
 
 class _AutoDJQueueHarness(AutoDJControllerMixin):
@@ -32,6 +40,15 @@ class _AutoDJQueueHarness(AutoDJControllerMixin):
 
 
 class AutoDJQueueRegressionTests(unittest.TestCase):
+    def setUp(self):
+        self.pool = _ImmediateThreadPool()
+        self.pool_patch = patch(
+            "radiostudio.ui.autodj_controller.QThreadPool",
+            SimpleNamespace(globalInstance=lambda: self.pool),
+        )
+        self.pool_patch.start()
+        self.addCleanup(self.pool_patch.stop)
+
     def test_track_start_history_reuses_metadata_already_loaded_for_the_display(self):
         metadata = SimpleNamespace(path="current.mp3", title="Current")
         library = Mock()
@@ -126,6 +143,100 @@ class AutoDJQueueRegressionTests(unittest.TestCase):
         self.assertEqual(player.autodj_panel.status,
                          "O bloco não tem bibliotecas habilitadas; ajuste sua seleção.")
 
+    def test_legacy_integer_library_id_matches_sqlite_text_id(self):
+        class Library:
+            @staticmethod
+            def libraries():
+                return [{"id": "7", "enabled": True}]
+
+        block = {"id": "legacy", "library_ids": [7]}
+        player = AutoDJControllerMixin()
+        player.music_library = Library()
+        player.autodj_programs = [block]
+
+        with patch("radiostudio.ui.autodj_controller.active_program", return_value=block):
+            selected_program, selected_ids, has_requested = player._autodj_selection()
+
+        self.assertIs(selected_program, block)
+        self.assertEqual(selected_ids, ["7"])
+        self.assertTrue(has_requested)
+
+    def test_schedule_change_bypasses_fill_throttle_and_replaces_old_block_queue(self):
+        with tempfile.TemporaryDirectory() as folder:
+            candidate_path = Path(folder) / "new-block.mp3"
+            candidate_path.write_bytes(b"audio")
+            old_block = {"id": "old", "library_ids": ["music"]}
+            new_block = {"id": "new", "library_ids": ["music"]}
+
+            class Library:
+                @staticmethod
+                def libraries():
+                    return [{"id": "music", "enabled": True}]
+
+                @staticmethod
+                def tracks_for_libraries(ids):
+                    self.assertEqual(ids, ["music"])
+                    return [{"path": str(candidate_path), "artist": "New Artist"}]
+
+                @staticmethod
+                def latest_track_plays(**_kwargs):
+                    return {}, {}
+
+            class Panel:
+                @staticmethod
+                def set_status(_status):
+                    pass
+
+            player = _AutoDJQueueHarness()
+            player.tracks = ["current.mp3", "old-generated.mp3"]
+            player.track_sources = ["manual", "autodj"]
+            player.autodj_config = {"enabled": True, "queue_ahead": 1}
+            player.autodj_programs = [new_block]
+            player.autodj_last_signature = (
+                program_signature(old_block), ("music",))
+            player.autodj_last_fill = 95.0
+            player.autodj_startup_pending = False
+            player.music_library = Library()
+            player.autodj_panel = Panel()
+
+            with patch("radiostudio.ui.autodj_controller.active_program",
+                       return_value=new_block), patch(
+                           "radiostudio.ui.autodj_controller.time.monotonic", return_value=100):
+                AutoDJControllerMixin.fill_autodj_queue(player)
+
+            self.assertEqual(player.tracks, ["current.mp3", str(candidate_path)])
+            self.assertEqual(player.track_sources, ["manual", "autodj"])
+            self.assertEqual(player.autodj_last_signature,
+                             (program_signature(new_block), ("music",)))
+
+    def test_unchanged_program_keeps_throttle_without_reading_library(self):
+        block = {"id": "same", "library_ids": ["music"]}
+
+        class Library:
+            @staticmethod
+            def libraries():
+                raise AssertionError("bloco inalterado deve respeitar o throttle")
+
+        class Panel:
+            @staticmethod
+            def set_status(_status):
+                pass
+
+        player = AutoDJControllerMixin()
+        player.autodj_config = {"enabled": True}
+        player.autodj_programs = [block]
+        player.autodj_last_signature = (program_signature(block), ("music",))
+        player.autodj_last_fill = 95.0
+        player.music_library = Library()
+        player.autodj_panel = Panel()
+
+        with patch("radiostudio.ui.autodj_controller.active_program",
+                   return_value=block), patch(
+                       "radiostudio.ui.autodj_controller.time.monotonic", return_value=100):
+            AutoDJControllerMixin.fill_autodj_queue(player)
+
+        self.assertEqual(player.autodj_last_fill, 95.0)
+
     def test_autodj_does_not_requeue_a_track_with_different_path_slashes(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "queued.mp3"
@@ -201,6 +312,163 @@ class AutoDJQueueRegressionTests(unittest.TestCase):
         self.assertEqual(player.autodj_panel.status,
                          "Aleatório — todas as bibliotecas: fila completa")
 
+    def test_autodj_worker_discards_stale_queue_result_and_applies_fresh_result(self):
+        with tempfile.TemporaryDirectory() as folder:
+            candidate = Path(folder) / "candidate.mp3"
+            candidate.write_bytes(b"audio")
+
+            class CapturingPool:
+                worker = None
+
+                def start(self, worker, priority=0):
+                    self.worker = worker
+
+            pool = CapturingPool()
+            self.pool = pool
+
+            class Library:
+                def __init__(self):
+                    self.queried = False
+
+                @staticmethod
+                def libraries():
+                    return [{"id": "music", "enabled": True}]
+
+                def tracks_for_libraries(self, _library_ids):
+                    self.queried = True
+                    return [{"path": str(candidate), "artist": "Artist"}]
+
+                @staticmethod
+                def latest_track_plays(**_kwargs):
+                    return {}, {}
+
+            class Panel:
+                status = ""
+
+                def set_status(self, status):
+                    self.status = status
+
+            player = AutoDJControllerMixin()
+            player.music_library = Library()
+            player.autodj_panel = Panel()
+            player.autodj_config = {"enabled": True, "queue_ahead": 1}
+            player.autodj_programs = []
+            player.autodj_last_signature = None
+            player.autodj_last_fill = 0.0
+            player.autodj_startup_pending = False
+            player.current_index = 0
+            player.tracks = ["current.mp3"]
+            player.track_sources = ["manual"]
+            player.refresh_playlist = lambda: None
+            player.save_state = lambda: None
+            player.autodj_next_calls = 0
+            player.next_track = lambda: setattr(
+                player, "autodj_next_calls", player.autodj_next_calls + 1)
+
+            AutoDJControllerMixin.fill_autodj_queue(player, force=True)
+
+            self.assertIsNotNone(pool.worker)
+            self.assertFalse(player.music_library.queried)
+            self.assertEqual(player.tracks, ["current.mp3"])
+
+            stale_worker = pool.worker
+            player._autodj_waiting_for_queue = True
+            player.tracks[0] = "changed-current.mp3"
+            player.track_sources[0] = "schedule"
+            stale_worker.run()
+
+            self.assertEqual(player.tracks, ["changed-current.mp3"])
+            self.assertFalse(player._autodj_waiting_for_queue)
+            self.assertIsNot(pool.worker, stale_worker)
+            self.assertTrue(player.music_library.queried)
+
+            player._autodj_waiting_for_queue = True
+            pool.worker.run()
+
+            self.assertEqual(player.tracks, ["changed-current.mp3", str(candidate)])
+            self.assertEqual(player.track_sources, ["schedule", "autodj"])
+            self.assertEqual(player.autodj_next_calls, 1)
+            self.assertFalse(player._autodj_waiting_for_queue)
+
+    def test_manual_stop_during_autodj_fill_prevents_automatic_resume(self):
+        with tempfile.TemporaryDirectory() as folder:
+            candidate = Path(folder) / "candidate.mp3"
+            candidate.write_bytes(b"audio")
+
+            class Library:
+                @staticmethod
+                def libraries():
+                    return [{"id": "music", "enabled": True}]
+
+                @staticmethod
+                def tracks_for_libraries(_library_ids):
+                    return [{"path": str(candidate), "artist": "Artist"}]
+
+                @staticmethod
+                def latest_track_plays(**_kwargs):
+                    return {}, {}
+
+            class Panel:
+                @staticmethod
+                def set_status(_status):
+                    pass
+
+            class MainWindowHarness(AutoDJControllerMixin):
+                def __init__(self):
+                    self.music_library = Library()
+                    self.autodj_panel = Panel()
+                    self.autodj_config = {"enabled": True, "queue_ahead": 1}
+                    self.autodj_programs = []
+                    self.autodj_last_signature = None
+                    self.autodj_last_fill = 0.0
+                    self.autodj_startup_pending = False
+                    self.current_index = -1
+                    self.tracks = []
+                    self.track_sources = []
+                    self.player = SimpleNamespace(
+                        playbackState=lambda: QMediaPlayer.StoppedState)
+                    self.playlist = SimpleNamespace(selectRow=lambda _row: None)
+                    self.next_calls = 0
+
+                def refresh_playlist(self):
+                    pass
+
+                def save_state(self):
+                    pass
+
+                def next_track(self):
+                    self.next_calls += 1
+
+                def cancel_transition_action(self):
+                    pass
+
+                def cancel_mix(self):
+                    pass
+
+                def automatic_fade_out_ms(self):
+                    return 0
+
+                def finish_stop(self):
+                    pass
+
+            window = MainWindowHarness()
+            window.gain_ramps = {}
+            window.gain_paused_at = None
+            window.gain_timer = SimpleNamespace(stop=lambda: None)
+            window.finish_stop = lambda: None
+            window.cancel_transition_action = lambda: None
+            window.cancel_mix = lambda: None
+            window.automatic_fade_out_ms = lambda: 0
+            self.pool = SimpleNamespace(worker=None, start=lambda worker, priority=0:
+                                        setattr(self.pool, "worker", worker))
+            window.fill_autodj_queue(force=True)
+            PlaybackMixin.stop(window)
+            self.pool.worker.run()
+
+            self.assertEqual(window._autodj_stop_generation, 1)
+            self.assertEqual(window.tracks, [str(candidate)])
+            self.assertEqual(window.next_calls, 0)
+
     def test_reserved_queue_artist_obeys_artist_cooldown(self):
         with tempfile.TemporaryDirectory() as folder:
             a1 = Path(folder) / "a1.mp3"
@@ -221,6 +489,43 @@ class AutoDJQueueRegressionTests(unittest.TestCase):
 
             self.assertEqual(chosen, other_artist)
             self.assertEqual(note, "")
+
+    def test_queue_fill_reserves_queued_artists_without_changing_selection(self):
+        with tempfile.TemporaryDirectory() as folder:
+            reserved_path = Path(folder) / "queued.mp3"
+            candidate_path = Path(folder) / "other-artist.mp3"
+            reserved_path.write_bytes(b"audio")
+            candidate_path.write_bytes(b"audio")
+
+            class Library:
+                def tracks_for_libraries(self, _library_ids):
+                    return [
+                        {"path": str(reserved_path), "artist": "Queued Artist"},
+                        {"path": str(candidate_path), "artist": "Other Artist"},
+                    ]
+
+                def latest_track_plays(self, **_kwargs):
+                    return {}, {}
+
+            request = {
+                "program": None,
+                "program_name": "Random",
+                "library_ids": ["library"],
+                "config": {"artist_cooldown_minutes": 60,
+                           "track_cooldown_minutes": 60},
+                "reserved_paths": (str(reserved_path),),
+                "excluded_paths": (),
+                "needed": 1,
+                "queue_target": 4,
+            }
+            worker = _AutoDJFillWorker(Library(), request)
+            results = []
+            worker.signals.finished.connect(results.append)
+
+            worker.run()
+
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0]["paths"], [str(candidate_path)])
 
     def test_never_played_track_is_not_recent_when_clock_is_small(self):
         with tempfile.TemporaryDirectory() as folder:

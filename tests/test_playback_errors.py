@@ -144,7 +144,8 @@ class _AudioPipelineHarness(AudioPipelineMixin):
     def __init__(self):
         self.player = _StatePlayer(QMediaPlayer.PausedState)
         self.mix_player = _StatePlayer(QMediaPlayer.PlayingState)
-        self.master_volume = 1.0
+        self.monitor_volume = 1.0
+        self.master_live_volume = 1.0
         self.mix_gain = 1.0
         self.forwarded = []
         self.events = []
@@ -166,13 +167,14 @@ class _GainHarness(PlaybackMixin):
         self.gain_timer = _FakeTimer()
         self.main_gain = 1.0
         self.mix_gain = 0.0
-        self.master_volume = 1.0
+        self.monitor_volume = 1.0
+        self.master_live_volume = 1.0
         self.audio = _GainAudio()
         self.mix_audio = _GainAudio()
         self.auto_transitions_enabled = False
 
     def apply_main_volume(self):
-        self.audio.setVolume(self.master_volume * self.main_gain)
+        self.audio.setVolume(self.master_live_volume * self.monitor_volume * self.main_gain)
 
 
 class _FakeStatusBar:
@@ -334,7 +336,8 @@ class _PlaybackHarness(PlaybackMixin):
         self.gain_ramps = {}
         self.gain_timer = _FakeTimer()
         self.main_gain = 1.0
-        self.master_volume = 0.8
+        self.monitor_volume = 0.8
+        self.master_live_volume = 1.0
         self.audio = _FakeAudio()
         self.on_air = _FakeOnAir()
         self.last_playback = {"was_playing": True}
@@ -461,6 +464,31 @@ class PlaybackErrorTests(unittest.TestCase):
         callbacks[0]()
 
         self.assertEqual(player.next_calls, 0)
+
+    def test_next_track_waits_for_async_autodj_queue_instead_of_stopping(self):
+        player = _PlaybackHarness()
+        player.player = _DisplayPlayer(
+            "current.mp3", 180000, 180000, QMediaPlayer.StoppedState,
+            QMediaPlayer.EndOfMedia)
+        player.current_index = 0
+        player.tracks = ["current.mp3"]
+        player.track_sources = ["manual"]
+        player.autodj_config = {"enabled": True}
+        player._autodj_fill_worker = object()
+        player.pending_transition_kind = None
+        player.gain_paused_at = None
+        player.mix_target_index = -1
+        player.cancel_pending_media_end = lambda: None
+        player.cancel_transition_action = lambda: None
+        player.cancel_mix = lambda: None
+        player.fill_autodj_queue = lambda **_kwargs: None
+        player.stop_calls = 0
+        player.stop = lambda: setattr(player, "stop_calls", player.stop_calls + 1)
+
+        PlaybackMixin.next_track(player)
+
+        self.assertTrue(player._autodj_waiting_for_queue)
+        self.assertEqual(player.stop_calls, 0)
 
     def test_end_transition_does_not_promote_mix_from_a_stale_queue_row(self):
         player = _PromotionHarness()

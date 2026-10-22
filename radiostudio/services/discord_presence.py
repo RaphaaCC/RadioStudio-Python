@@ -185,6 +185,7 @@ class DiscordPresenceService(QObject):
         self._stopping = False
         self._client_id = DISCORD_APPLICATION_ID
         self._enabled = False
+        self._verification_requested = False
         self._activity: dict = {}
         self._generation = 0
         self._available = False
@@ -261,23 +262,34 @@ class DiscordPresenceService(QObject):
         with self._lock:
             return self._status
 
-    def configure(self, client_id: str, enabled: bool = False) -> None:
+    def configure(self, client_id: str, enabled: bool = False, *,
+                  verify: bool = False) -> None:
         client_id = str(client_id or "").strip()
         if not valid_discord_app_id(client_id):
             client_id = ""
+        enabled = bool(enabled)
+        verify = bool(verify and client_id and not enabled)
         with self._lock:
             changed_client = client_id != self._client_id
+            changed_state = (changed_client or enabled != self._enabled
+                             or verify != self._verification_requested)
             self._client_id = client_id
-            self._enabled = bool(enabled)
+            self._enabled = enabled
+            self._verification_requested = verify
             if changed_client:
-                self._generation += 1
                 self._activity = {}
+            if changed_state:
+                self._generation += 1
             if not client_id:
                 self._set_status_locked(
                     False, "Abra o aplicativo Discord e verifique a conexão.")
-            elif changed_client or not self._available:
-                self._set_status_locked(False, "Verificando conexão e registro da Rich Presence…")
-            if client_id and not self._stopping:
+            elif enabled or verify:
+                if changed_state or not self._available:
+                    self._set_status_locked(
+                        False, "Verificando conexão e registro da Rich Presence…")
+            else:
+                self._set_status_locked(False, "Rich Presence desativada.")
+            if client_id and (enabled or verify) and not self._stopping:
                 if not self._thread or not self._thread.is_alive():
                     self._thread = threading.Thread(
                         target=self._run, name="RadioStudio Discord RPC", daemon=True)
@@ -337,11 +349,13 @@ class DiscordPresenceService(QObject):
                 if self._stopping:
                     client_id = ""
                     enabled = False
+                    verify_requested = False
                     activity = {}
                     generation = self._generation
                 else:
                     client_id = self._client_id
                     enabled = self._enabled
+                    verify_requested = self._verification_requested
                     activity = dict(self._activity)
                     generation = self._generation
 
@@ -361,6 +375,18 @@ class DiscordPresenceService(QObject):
                     self._close_rpc(rpc, last_activity is not None)
                     rpc = None
                     last_activity = None
+                self._wake.wait()
+                continue
+
+            if not enabled and not verify_requested:
+                if rpc is not None:
+                    self._close_rpc(rpc, last_activity is not None)
+                    rpc = None
+                    rpc_client_id = ""
+                    last_activity = None
+                # Presence is optional; avoid repeatedly opening Discord IPC
+                # when the user has disabled it. The Settings button requests
+                # a single connection probe when needed.
                 self._wake.wait()
                 continue
 
@@ -405,6 +431,16 @@ class DiscordPresenceService(QObject):
                     if not still_current:
                         self._close_rpc(candidate, candidate_activity_set)
                         continue
+                    if verify_requested and not enabled:
+                        self._close_rpc(candidate, candidate_activity_set)
+                        candidate = None
+                        with self._lock:
+                            if generation == self._generation and not self._stopping:
+                                self._verification_requested = False
+                        retry_at = 0.0
+                        self._status_update(
+                            True, "Discord conectado; Rich Presence registrada.", generation)
+                        continue
                     rpc = candidate
                     rpc_client_id = client_id
                     rpc_generation = generation
@@ -415,7 +451,14 @@ class DiscordPresenceService(QObject):
                 except Exception as exc:
                     self._close_rpc(candidate, candidate_activity_set)
                     rpc = None
-                    retry_at = now + self.RETRY_INTERVAL
+                    verification_only = verify_requested and not enabled
+                    if verification_only:
+                        with self._lock:
+                            if generation == self._generation:
+                                self._verification_requested = False
+                        retry_at = 0.0
+                    else:
+                        retry_at = now + self.RETRY_INTERVAL
                     _LOG.info("Discord Rich Presence indisponível (%s): %s",
                               type(exc).__name__, exc)
                     self._status_update(

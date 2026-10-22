@@ -6,14 +6,19 @@ import logging
 import sys
 import ctypes
 import time
+import builtins
 from PySide6.QtGui import QIcon
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication, QInputDialog
 
-from .config import APP_DIR, APP_ICON_FILE, APP_NAME, INSTANCE_NAME, STATE_FILE
+from .config import (APP_DIR, APP_ICON_FILE, APP_NAME, INSTALL_LANGUAGE_FILE,
+                     INSTANCE_NAME, LANGUAGE_FILE, STATE_FILE)
+from .i18n import (LANGUAGE_CHOICES, install_translations, read_language_preference,
+                   save_language_preference, translate)
 from .runtime_safety import configure_exception_logging, guarded
 from .ui.main_window import RadioStudio
 from .ui.icons import apply_app_icon
+from .ui.message_boxes import show_critical
 
 
 def set_windows_app_id() -> None:
@@ -46,6 +51,9 @@ def main() -> int:
     # caption. The main window already sets its full name and version itself.
     app.setApplicationDisplayName("")
     app.setWindowIcon(QIcon(str(APP_ICON_FILE)))
+    language_preference, language_was_configured = read_language_preference(
+        STATE_FILE, LANGUAGE_FILE, INSTALL_LANGUAGE_FILE)
+    install_translations(app, language_preference)
     restart_wait_flag = "--radiostudio-restart-wait"
     if restart_wait_flag in sys.argv[1:]:
         # A restarted copy waits for the previous process to release the
@@ -86,15 +94,31 @@ def main() -> int:
         if not instance_server.listen(INSTANCE_NAME):
             message = f"Não foi possível criar o controle de instância única: {instance_server.errorString()}"
             logging.getLogger("radiostudio").error(message)
-            QMessageBox.critical(None, "Erro ao iniciar", message)
+            show_critical(None, translate("Erro ao iniciar"), message)
             return 1
+    if getattr(builtins, "_RADIOSTUDIO_PORTABLE", False) and not language_was_configured:
+        labels = [translate(label) for label, _ in LANGUAGE_CHOICES]
+        selected, accepted = QInputDialog.getItem(
+            None, translate("Escolha o idioma do RadioStudio"),
+            translate("Selecione o idioma. Você poderá alterá-lo depois nas Configurações."),
+            labels, 0, False)
+        language_preference = next(
+            (value for label, value in LANGUAGE_CHOICES if translate(label) == selected),
+            "system"
+        ) if accepted else "system"
+        try:
+            save_language_preference(LANGUAGE_FILE, language_preference)
+        except OSError:
+            logging.getLogger("radiostudio").exception(
+                "Não foi possível salvar a preferência de idioma")
+        install_translations(app, language_preference)
     try:
         window = RadioStudio()
     except Exception as exc:
         logging.getLogger("radiostudio").exception("Falha ao criar a janela principal")
-        QMessageBox.critical(None, "Erro ao iniciar",
-                             f"O programa não conseguiu iniciar.\n\n{exc}\n\n"
-                             f"Consulte o log em: {APP_DIR / 'app.log'}")
+        show_critical(None, translate("Erro ao iniciar"),
+                       translate(f"O programa não conseguiu iniciar.\n\n{exc}\n\n"
+                       f"Consulte o log em: {APP_DIR / 'app.log'}"))
         return 1
     if instance_server.isListening():
         def reopen_existing_window():

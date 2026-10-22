@@ -18,6 +18,7 @@ class DiscordPresenceCacheTests(unittest.TestCase):
         presence = Mock()
         app = SimpleNamespace(
             discord_client_id="123456789012345678",
+            discord_enabled=True,
             player=player,
             mix_player=mix_player,
             mix_target_index=-1,
@@ -63,6 +64,18 @@ class DiscordPresenceCacheTests(unittest.TestCase):
                          "https://radio.example/cover")
         self.assertEqual(presence.set_activity.call_args.args[0]["cover_version"],
                          "a1b2c3d4e5f60718")
+
+    def test_disabled_presence_skips_playback_and_metadata_work(self):
+        app = SimpleNamespace(
+            discord_client_id="123456789012345678",
+            discord_enabled=False,
+            discord_presence=Mock(),
+        )
+        with patch("radiostudio.ui.main_window.read_track_metadata") as read_metadata:
+            RadioStudio.sync_discord_presence(app)
+
+        read_metadata.assert_not_called()
+        app.discord_presence.set_activity.assert_not_called()
 
 
 if __name__ == "__main__":

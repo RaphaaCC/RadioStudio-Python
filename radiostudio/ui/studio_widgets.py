@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from ..runtime_safety import guarded
+from ..i18n import current_language, translate
 
 from array import array
 from datetime import datetime
@@ -15,13 +16,11 @@ import time
 from collections import deque
 
 import imageio_ffmpeg
-from PySide6.QtCore import QProcess, Qt, QRectF, QTimer, Signal
+from PySide6.QtCore import QLocale, QProcess, Qt, QRectF, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPalette, QPen, QPixmap
 from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 
-WEEKDAYS = ("Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom")
-MONTHS = ("Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez")
 MAX_WAVE_BYTES = 16 * 1024 * 1024
 WAVEFORM_STYLES = (
     ("Barras clássicas", "bars"),
@@ -104,7 +103,10 @@ class StudioClock(QFrame):
     @guarded
     def update_time(self):
         now = datetime.now()
-        date_text = f"{WEEKDAYS[now.weekday()]} {now.day:02} {MONTHS[now.month - 1]} {now.year}"
+        locale = QLocale(current_language())
+        weekday = locale.dayName(now.isoweekday(), QLocale.FormatType.ShortFormat)
+        month = locale.monthName(now.month, QLocale.FormatType.ShortFormat)
+        date_text = f"{weekday} {now.day:02} {month} {now.year}"
         if date_text != self._date_text:
             self._date_text = date_text
             self.date_label.setText(date_text)
@@ -113,7 +115,8 @@ class StudioClock(QFrame):
             self._time_text = time_text
             self.time_label.setText(time_text)
         remaining = 3600 - now.minute * 60 - now.second
-        hour_text = f"Próxima hora em {remaining // 60:02}:{remaining % 60:02}"
+        hour_text = translate(
+            f"Próxima hora em {remaining // 60:02}:{remaining % 60:02}")
         if hour_text != self._hour_text:
             self._hour_text = hour_text
             self.hour_label.setText(hour_text)
@@ -433,9 +436,9 @@ class OnAirPanel(QFrame):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(1)
         header = QHBoxLayout()
-        self.on_air_heading = QLabel("NO AR")
+        self.on_air_heading = QLabel(translate("NO AR"))
         self.on_air_heading.setFont(QFont("Segoe UI", 9, QFont.Bold))
-        self.title = QLabel("Nenhuma faixa em reprodução")
+        self.title = QLabel(translate("Nenhuma faixa em reprodução"))
         self.title.setAlignment(Qt.AlignCenter)
         self.title.setFont(QFont("Segoe UI", 10, QFont.DemiBold))
         header.addWidget(self.on_air_heading)
@@ -444,8 +447,8 @@ class OnAirPanel(QFrame):
         self.waveform = Waveform()
         layout.addWidget(self.waveform, 1)
         times = QHBoxLayout()
-        self.elapsed = QLabel("00:00")
-        self.remaining = QLabel("−00:00")
+        self.elapsed = QLabel(translate("00:00"))
+        self.remaining = QLabel(translate("−00:00"))
         self.remaining.setAlignment(Qt.AlignRight)
         times.addWidget(self.elapsed)
         times.addWidget(self.remaining, 1)
@@ -576,8 +579,8 @@ class OnAirPanel(QFrame):
         self.cover_art.set_cover_image(None)
         self.track_changed.emit("")
         self.waveform.reset_live()
-        self.title.setText("Nenhuma faixa em reprodução")
-        self.title.setToolTip("")
+        self.title.setText(translate("Nenhuma faixa em reprodução"))
+        self.title.setToolTip(translate(""))
         self.waveform.set_levels([])
         self.set_progress(0, 0)
 
@@ -722,18 +725,18 @@ class CoverArtLabel(QLabel):
             "border: 1px solid palette(mid); border-radius: 3px; }"
         )
         self._image = None
-        self.setText("♪\nSem capa")
+        self.setText(translate("♪\nSem capa"))
         self.setCursor(Qt.ArrowCursor)
-        self.setToolTip("Nenhuma capa disponível")
+        self.setToolTip(translate("Nenhuma capa disponível"))
 
     def set_cover_image(self, image):
         self._image = image if image is not None and not image.isNull() else None
         if self._image is None:
             self.setCursor(Qt.ArrowCursor)
-            self.setToolTip("Nenhuma capa disponível")
+            self.setToolTip(translate("Nenhuma capa disponível"))
         else:
             self.setCursor(Qt.PointingHandCursor)
-            self.setToolTip(f"Clique para visualizar a capa {self._description}")
+            self.setToolTip(translate(f"Clique para visualizar a capa {self._description}"))
         self._update_pixmap()
 
     def mouseReleaseEvent(self, event):
@@ -745,7 +748,7 @@ class CoverArtLabel(QLabel):
     def _update_pixmap(self):
         if self._image is None:
             self.setPixmap(QPixmap())
-            self.setText("♪\nSem capa")
+            self.setText(translate("♪\nSem capa"))
             return
         rect = self.contentsRect()
         width, height = rect.width(), rect.height()
@@ -755,7 +758,7 @@ class CoverArtLabel(QLabel):
             width, height, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
         x = max(0, (scaled.width() - width) // 2)
         y = max(0, (scaled.height() - height) // 2)
-        self.setText("")
+        self.setText(translate(""))
         self.setPixmap(scaled.copy(x, y, width, height))
 
     def resizeEvent(self, event):

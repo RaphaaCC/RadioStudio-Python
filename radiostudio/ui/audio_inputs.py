@@ -5,52 +5,71 @@ import math
 from ._shared import *
 from ..runtime_safety import guarded
 from ..services.audio_inputs import INPUT_LABELS
+from ..i18n import translate
 
 
 class AudioInputsControllerMixin:
+    def _sync_audio_input_buttons(self, channel: str, enabled: bool):
+        panel = getattr(self, "audio_inputs_panel", None)
+        if panel is not None:
+            panel.set_enabled(channel, enabled)
+        if channel == "microphone":
+            button = getattr(self, "quick_microphone_button", None)
+            if button is not None and button.isChecked() != enabled:
+                button.blockSignals(True)
+                button.setChecked(enabled)
+                button.blockSignals(False)
+
     @guarded
     def set_audio_input_active(self, channel: str, enabled: bool):
         if channel not in INPUT_LABELS:
             return
+        input_label = translate(INPUT_LABELS[channel])
         if enabled:
             started = self.audio_input_controller.start(channel)
-            self.audio_inputs_panel.set_enabled(channel, started)
+            self._sync_audio_input_buttons(channel, started)
             if not started:
-                self.statusBar().showMessage(f"Não foi possível ativar {INPUT_LABELS[channel]}")
+                self.statusBar().showMessage(translate(
+                    "Não foi possível ativar {v1}").format(v1=input_label))
             else:
                 if channel == "microphone":
                     self.mic_active = True
                     self.update_music_duck_target()
-                self.log_event("connected", f"{INPUT_LABELS[channel]} ativado")
-                self.statusBar().showMessage(f"{INPUT_LABELS[channel]} enviado ao master")
+                self.log_event("connected", f"{input_label} ativado")
+                self.statusBar().showMessage(translate(
+                    "{v0} enviado ao master").format(v0=input_label))
         else:
             was_active = channel in self.audio_input_controller.active
             self.audio_input_controller.stop(channel)
-            self.audio_inputs_panel.set_enabled(channel, False)
+            self._sync_audio_input_buttons(channel, False)
             if channel == "microphone":
                 self.mic_active = False
                 self.mic_speaking = False
                 self.update_music_duck_target()
             if was_active:
-                self.log_event("disconnected", f"{INPUT_LABELS[channel]} desativado")
-                self.statusBar().showMessage(f"{INPUT_LABELS[channel]} desativado")
+                self.log_event("disconnected", f"{input_label} desativado")
+                self.statusBar().showMessage(translate(
+                    "{v0} desativado").format(v0=input_label))
 
     @guarded
     def audio_input_status_changed(self, channel: str, status: str):
         if channel == "monitor":
             if status.startswith(("Escuta local indisponível", "Escuta local interrompida", "Sem dispositivo")):
                 self.log_event("error", status)
-                self.statusBar().showMessage(status)
+                self.statusBar().showMessage(translate(status))
             return
         self.audio_inputs_panel.set_status(channel, status)
         if not status.startswith(("Ativo", "Desativado")):
-            self.audio_inputs_panel.set_enabled(channel, False)
+            self._sync_audio_input_buttons(channel, False)
             if channel == "microphone":
                 self.mic_active = False
                 self.mic_speaking = False
                 self.update_music_duck_target()
-            self.log_event("error", f"{INPUT_LABELS.get(channel, channel)}: {status}")
-            self.statusBar().showMessage(f"{INPUT_LABELS.get(channel, channel)}: {status}")
+            input_label = translate(INPUT_LABELS.get(channel, channel))
+            display_status = translate(status)
+            message = f"{input_label}: {display_status}"
+            self.log_event("error", message)
+            self.statusBar().showMessage(message)
 
     @guarded
     def microphone_speech_changed(self, speaking: bool):
@@ -73,7 +92,8 @@ class AudioInputsControllerMixin:
             self.music_duck_gain = self.music_duck_target
             self.duck_timer.stop()
             self.apply_main_volume()
-            self.mix_audio.setVolume(self.master_volume * self.mix_gain * self.music_duck_gain)
+            self.mix_audio.setVolume(
+                self.monitor_output_gain() * self.mix_gain * self.music_duck_gain)
             return
         if not self.duck_timer.isActive():
             self.duck_timer.start()
@@ -89,5 +109,6 @@ class AudioInputsControllerMixin:
             time_constant = 0.09 if difference < 0 else 0.42
             self.music_duck_gain += difference * (1 - math.exp(-0.02 / time_constant))
         self.apply_main_volume()
-        self.mix_audio.setVolume(self.master_volume * self.mix_gain * self.music_duck_gain)
+        self.mix_audio.setVolume(
+            self.monitor_output_gain() * self.mix_gain * self.music_duck_gain)
         self.apply_cart_local_volume()

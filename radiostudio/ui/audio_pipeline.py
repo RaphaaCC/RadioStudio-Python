@@ -20,12 +20,12 @@ def trailing_silence_scan_window(duration_ms, mix_ms, fade_out_ms):
 class AudioPipelineMixin:
     @guarded
     def forward_buffer(self, source_id, buffer, gain):
-        if not buffer.isValid() or not self.broadcast.running:
+        if not buffer.isValid() or not self.broadcast.audio_bus_active:
             return
         fmt = buffer.format()
         if (fmt.sampleRate() != SAMPLE_RATE or fmt.channelCount() != CHANNELS
                 or fmt.sampleFormat() != QAudioFormat.Int16):
-            self.statusBar().showMessage("Formato de áudio incompatível com a transmissão")
+            self.statusBar().showMessage(translate("Formato de áudio incompatível com a transmissão"))
             return
         if source_id in ("main", "mix") or source_id.startswith("cart-"):
             gain *= getattr(self, "music_duck_gain", 1.0)
@@ -56,8 +56,8 @@ class AudioPipelineMixin:
             return
         active = player is self.player
         if active and player.playbackState() == QMediaPlayer.PlayingState:
-            # master_volume belongs to local monitoring. Keep the program feed at
-            # unity and apply only transition/ducking gains before transmission.
+            # Monitor volume belongs only to local listening. Keep the program
+            # feed independent; Master Ao Vivo is applied in the shared mixer.
             # Queue PCM before non-essential waveform/silence analysis so an
             # expensive UI update cannot delay this source's audio buffer.
             self.forward_buffer("main", buffer, self.main_gain)

@@ -1,5 +1,6 @@
 import struct
 import unittest
+from unittest.mock import patch
 
 from PySide6.QtWidgets import QApplication
 from PySide6.QtMultimedia import QAudioFormat
@@ -7,7 +8,8 @@ from PySide6.QtMultimedia import QAudioFormat
 from radiostudio.services.audio_inputs import (convert_input_to_master,
                                                convert_master_to_device,
                                                mix_pcm_chunks, pcm_rms_db,
-                                               AudioInputController)
+                                               AudioInputController,
+                                               INPUT_PUMP_MAX_MS)
 from radiostudio.services.broadcast import PCMBuffer, PCM_BYTES_PER_FRAME, SAMPLE_RATE
 
 
@@ -141,10 +143,112 @@ class AudioInputConversionTests(unittest.TestCase):
         }
 
         controller._pump()
+        controller._pump()
 
         self.assertEqual(len(broadcast.calls), 1)
         self.assertEqual(broadcast.calls[0][0], "input:aux1")
         self.assertEqual(broadcast.calls[0][2], 1.0)
+        controller.active.clear()
+        controller.deleteLater()
+        self.app.processEvents()
+
+    def test_input_pump_bounds_conversion_work_after_a_backlog(self):
+        class FakeBroadcast:
+            def push_audio(self, *_args):
+                pass
+
+            def remove_source(self, _source):
+                pass
+
+        class ReadDevice:
+            def __init__(self, data):
+                self.data = bytearray(data)
+                self.read_sizes = []
+
+            def bytesAvailable(self):
+                return len(self.data)
+
+            def read(self, length):
+                self.read_sizes.append(length)
+                chunk = bytes(self.data[:length])
+                del self.data[:length]
+                return chunk
+
+        audio_format = QAudioFormat()
+        audio_format.setSampleRate(48000)
+        audio_format.setChannelCount(2)
+        audio_format.setSampleFormat(QAudioFormat.Float)
+        source = ReadDevice(b"\0" * (48000 * 2 * 4 // 5))  # 200 ms queued
+        controller = AudioInputController(FakeBroadcast())
+        controller.monitor_enabled = False
+        controller.active["aux1"] = {
+            "io": source,
+            "format": audio_format,
+            "pending": bytearray(),
+            "raw_pending": bytearray(),
+            "input_frame_bytes": 8,
+        }
+
+        controller._pump()
+
+        expected_bytes = 48000 * 2 * 4 * INPUT_PUMP_MAX_MS // 1000
+        self.assertEqual(source.read_sizes, [expected_bytes])
+        self.assertGreater(source.bytesAvailable(), 0)
+        controller.active.clear()
+        controller.deleteLater()
+        self.app.processEvents()
+
+    def test_input_pump_budget_rotates_channels_without_starvation(self):
+        class FakeBroadcast:
+            def push_audio(self, *_args):
+                pass
+
+            def remove_source(self, _source):
+                pass
+
+        class ReadDevice:
+            def __init__(self, marker):
+                self.data = bytearray([marker] * (48000 * 2 * 4 // 100))
+
+            def bytesAvailable(self):
+                return len(self.data)
+
+            def read(self, length):
+                chunk = bytes(self.data[:length])
+                del self.data[:length]
+                return chunk
+
+        audio_format = QAudioFormat()
+        audio_format.setSampleRate(48000)
+        audio_format.setChannelCount(2)
+        audio_format.setSampleFormat(QAudioFormat.Float)
+        controller = AudioInputController(FakeBroadcast())
+        controller.monitor_enabled = False
+        controller._monitor_deadline = float("inf")
+        controller.active = {
+            "aux1": {"io": ReadDevice(1), "format": audio_format,
+                     "pending": bytearray(), "raw_pending": bytearray(),
+                     "input_frame_bytes": 8},
+            "aux2": {"io": ReadDevice(2), "format": audio_format,
+                     "pending": bytearray(), "raw_pending": bytearray(),
+                     "input_frame_bytes": 8},
+        }
+        now = [0.0]
+        converted = []
+
+        def slow_conversion(data, _format):
+            converted.append(data[0])
+            now[0] += INPUT_PUMP_MAX_MS / 1000 + 0.001
+            return bytes(PCM_BYTES_PER_FRAME)
+
+        with patch("radiostudio.services.audio_inputs.time.monotonic",
+                   side_effect=lambda: now[0]), \
+                patch("radiostudio.services.audio_inputs.convert_input_to_master",
+                      side_effect=slow_conversion):
+            controller._pump()
+            controller._pump()
+
+        self.assertEqual(converted, [1, 2])
         controller.active.clear()
         controller.deleteLater()
         self.app.processEvents()

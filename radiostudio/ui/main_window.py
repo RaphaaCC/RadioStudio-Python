@@ -6,10 +6,10 @@ import tempfile
 import uuid
 from pathlib import Path
 
-from PySide6.QtCore import QFileSystemWatcher, Qt, QTimer
+from PySide6.QtCore import QFileSystemWatcher, QSize, Qt, QTimer
 from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtWidgets import (
-    QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton,
+    QDialog, QDialogButtonBox, QHeaderView, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton,
     QVBoxLayout,
 )
 
@@ -22,38 +22,57 @@ from .explorer import ExplorerMixin
 from .playlist import PlaylistMixin
 from .settings_controller import SettingsControllerMixin
 from .playback import PlaybackMixin
+from .recording_panel import RecordingPanel, default_recording_folder
 from .scheduler import SchedulerMixin
 from .cart_wall import CartWallMixin
 from .audio_pipeline import AudioPipelineMixin
 from .audio_inputs import AudioInputsControllerMixin
 from .persistence import PersistenceMixin
+from .recording_controller import RecordingControllerMixin
 from .autodj_panel import AutoDJPanel
 from .autodj_controller import AutoDJControllerMixin
 from .preview_player_dialog import PreviewPlayerDialog
 from ..services.music_library import MusicLibrary
-from ..services.audio_inputs import AudioInputController, INPUT_CHANNELS
+from ..services.audio_inputs import AudioInputController, INPUT_CHANNELS, INPUT_LABELS
 from ..services.transition_analysis import TransitionAnalyzer
 from ..services.audio_decode_fallback import AudioDecodeFallback
 from ..services.discord_presence import DiscordPresenceService, make_activity
+from ..services.control_api import (
+    APICommandBridge, API_DEFAULT_PORT, APIError, ControlAPIServer,
+    get_api_basic_credentials, get_api_token, parse_allowed_origins,
+)
 from ..services.audio_paths import audio_path_key, same_audio_path
 from ..services.cover_art import CoverArtLoader
 from ..config import (ABOUT_LOGO_FILE, APP_DIR, APP_NAME, APP_VERSION,
                       DISCORD_APPLICATION_ID, LICENSE_FILE, MUSIC_LIBRARY_FILE,
                       PROJECT_ISSUES_URL, PROJECT_REPOSITORY_URL, USER_MANUAL_FILE)
-from .icons import app_icon, apply_app_icon
+from ..i18n import current_preference, translate
+from .icons import (app_icon, apply_app_icon, explorer_icon,
+                    translated_icon_label, ui_icon)
 from .studio_widgets import CoverArtLabel
 
 
 class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControllerMixin,
                   PlaybackMixin, SchedulerMixin, AutoDJControllerMixin, CartWallMixin, AudioPipelineMixin,
-                  AudioInputsControllerMixin, PersistenceMixin, QMainWindow):
+                  AudioInputsControllerMixin, RecordingControllerMixin, PersistenceMixin, QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(APP_DISPLAY_NAME)
         self.resize(1250, 760)
+        self.language_preference = current_preference()
         self.tracks = []
         self.track_sources = []
         self.events = []
+        self.scheduler_started_at = datetime.now()
+        self.recording_config = {
+            "folder": str(default_recording_folder()), "format": "mp3",
+            "bitrate": 192, "auto_on_broadcast": False,
+        }
+        self.recording_schedules = []
+        self.recording_schedule_session = {}
+        self._recording_schedule_fired = set()
+        self._recording_owner = ""
+        self._broadcast_recording_session_id = None
         self.backup_directory = ""
         self.backup_periodic_enabled = False
         self.backup_interval_seconds = 86400
@@ -61,6 +80,12 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         self.backup_last_run = 0.0
         self._backup_retry_after = 0.0
         self._backup_worker = None
+        self.control_api_config = {
+            "enabled": False, "port": API_DEFAULT_PORT,
+            "auth_mode": "token", "allowed_origins": [],
+        }
+        self._api_queue_signature = None
+        self._api_queue_revision = uuid.uuid4().int & ((1 << 52) - 1)
         self._active_settings_dialog = None
         self._skip_state_save = False
         self.music_library_fallback = False
@@ -98,6 +123,8 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         self.music_duck_target = 1.0
         self.local_master_enabled = True
         self.station_metadata = DEFAULT_STATION_METADATA.copy()
+        self.metadata_update_mode = "current"
+        self.metadata_update_interval_seconds = 30
         self.explorer_folder = ""
         self.pending_track_log = None
         self.minimize_to_tray = True
@@ -143,7 +170,8 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         self.silence_hold_ms = 1200
         self.main_gain = 1.0
         self.mix_gain = 0.0
-        self.master_volume = 0.8
+        self.master_live_volume = 1.0
+        self.monitor_volume = 0.8
         self.mix_timer = None
         self.mix_target_index = -1
         self.mix_fade_duration_ms = 0
@@ -170,6 +198,8 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         self.decoded_audio_sources = {}
         self.audio_fallback_attempts = {}
         self.player = QMediaPlayer(self)
+        self.control_api_bridge = APICommandBridge(self._handle_control_api_request, self)
+        self.control_api = ControlAPIServer(self.control_api_bridge.dispatch)
         self.player_slot_a = self.player
         self.audio = QAudioOutput(self)
         self.player.setAudioOutput(self.audio)
@@ -180,6 +210,9 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         self.preview_player.setAudioOutput(self.preview_audio)
         self.preview_dialog = PreviewPlayerDialog(self.preview_player, self.preview_audio, self)
         self.broadcast = BroadcastManager()
+        self.broadcast.set_metadata_update_preferences(
+            self.metadata_update_mode, self.metadata_update_interval_seconds)
+        self.broadcast.set_master_gain(self.master_live_volume)
         self.audio_input_controller = AudioInputController(self.broadcast, self)
         self.audio_input_controller.status_changed.connect(self.audio_input_status_changed)
         self.audio_input_controller.speech_activity_changed.connect(self.microphone_speech_changed)
@@ -244,23 +277,172 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         QApplication.instance().styleHints().colorSchemeChanged.connect(self.refresh_event_colors)
         self.load_event_log()
         self.load_state()
+        self.recording_panel.apply_settings()
+        self.recording_panel.refresh_schedules()
         self.request_selected_cover()
         self.discord_presence.configure(self.discord_client_id, self.discord_enabled)
         if self.music_library_fallback:
             message = "Banco de bibliotecas indisponível; AutoDJ está usando um índice temporário."
             self.log_event("error", message)
-            self.statusBar().showMessage(message)
+            self.statusBar().showMessage(translate(message))
         self.setup_tray()
         QTimer.singleShot(0, self.restore_playback)
+        QTimer.singleShot(0, self._start_control_api_after_startup)
         QTimer.singleShot(500, self.restore_broadcast)
         self.scheduler_timer = QTimer(self)
         self.scheduler_timer.timeout.connect(self.check_schedule)
+        self.scheduler_timer.timeout.connect(self.check_recording_schedules)
         self.scheduler_timer.start(1000)
         self.backup_timer = QTimer(self)
         self.backup_timer.setInterval(60_000)
         self.backup_timer.timeout.connect(self.check_scheduled_backup)
         self.backup_timer.start()
         QTimer.singleShot(1200, self.start_autodj_if_needed)
+
+    def _start_control_api_after_startup(self):
+        if not self.is_quitting and self.control_api_config.get("enabled"):
+            started, error = self._configure_control_api_server()
+            if not started:
+                logging.getLogger("radiostudio").warning(translate(
+                    "A API REST não iniciou: {error}").format(
+                        error=error or "falha não especificada"))
+
+    def _configure_control_api_server(self):
+        bridge = getattr(self, "control_api_bridge", None)
+        if bridge is not None:
+            bridge.set_active(False)
+        self.control_api.stop()
+        config = self.control_api_config
+        if not config.get("enabled"):
+            return True, ""
+        try:
+            auth_mode = config.get("auth_mode", "token")
+            username = password = token = ""
+            if auth_mode == "basic":
+                credentials = get_api_basic_credentials()
+                if credentials:
+                    username, password = credentials
+                if not username or not password:
+                    return False, "Credencial de login e senha não encontrada no Gerenciador de Credenciais."
+            elif auth_mode == "token":
+                token = get_api_token() or ""
+                if not token:
+                    return False, "Token não encontrado no Gerenciador de Credenciais."
+            else:
+                return False, "Modo de autenticação inválido."
+            if bridge is not None:
+                bridge.set_active(True)
+            self.control_api.start(
+                host="0.0.0.0", port=config.get("port", API_DEFAULT_PORT),
+                auth_mode=auth_mode, username=username, password=password, token=token,
+                allowed_origins=config.get("allowed_origins", []))
+            return True, ""
+        except Exception as exc:
+            if bridge is not None:
+                bridge.set_active(False)
+            self.control_api.stop()
+            logging.getLogger("radiostudio").warning(
+                "Falha ao iniciar o servidor da API REST na porta %s (%s)",
+                config.get("port", API_DEFAULT_PORT), type(exc).__name__)
+            return False, str(exc)
+
+    def _control_api_queue_revision_value(self):
+        signature = (tuple(self.tracks), tuple(self.track_sources),
+                     int(self.current_index))
+        if signature != self._api_queue_signature:
+            self._api_queue_signature = signature
+            self._api_queue_revision += 1
+        return self._api_queue_revision
+
+    def _control_api_queue_item(self, index):
+        def cell_text(column):
+            item = self.playlist.item(index, column)
+            return item.text() if item is not None else ""
+
+        return {
+            "position": index,
+            "title": cell_text(0),
+            "artist": cell_text(1),
+            "album": cell_text(2),
+            "is_current": index == self.current_index,
+        }
+
+    def _control_api_status(self):
+        state = self.player.playbackState()
+        if state == QMediaPlayer.PlayingState:
+            playback_state = "playing"
+        elif state == QMediaPlayer.PausedState:
+            playback_state = "paused"
+        else:
+            playback_state = "stopped"
+        current_track = (self._control_api_queue_item(self.current_index)
+                        if 0 <= self.current_index < len(self.tracks) else None)
+        return {
+            "playback_state": playback_state,
+            "position_ms": max(0, int(self.player.position())),
+            "duration_ms": max(0, int(self.player.duration())),
+            "current_track": current_track,
+            "queue_length": len(self.tracks),
+            "queue_revision": self._control_api_queue_revision_value(),
+        }
+
+    def _control_api_queue(self):
+        revision = self._control_api_queue_revision_value()
+        items = [self._control_api_queue_item(index)
+                 for index in range(len(self.tracks))]
+        current_track = (items[self.current_index]
+                         if 0 <= self.current_index < len(items) else None)
+        return {"revision": revision, "current_track": current_track, "items": items}
+
+    def _handle_control_api_request(self, operation, payload):
+        if self.is_quitting:
+            raise APIError(503, "application_shutting_down",
+                           "RadioStudio is shutting down.")
+        if operation == "status":
+            return self._control_api_status()
+        if operation == "queue":
+            return self._control_api_queue()
+        if operation == "playback":
+            action = payload.get("action")
+            state = self.player.playbackState()
+            if action == "play":
+                if state == QMediaPlayer.PausedState:
+                    self.pause()
+                elif state == QMediaPlayer.StoppedState:
+                    row = self.current_index
+                    if not 0 <= row < len(self.tracks):
+                        row = self.playlist.currentRow()
+                    if row < 0 and self.tracks:
+                        row = 0
+                    if row >= 0:
+                        self.play_index(row)
+            elif action == "pause":
+                if state == QMediaPlayer.PlayingState:
+                    self.pause()
+            elif action == "stop":
+                self.stop()
+            elif action == "next":
+                self.next_track()
+            else:
+                raise APIError(400, "invalid_action", "Unsupported playback action.")
+            return self._control_api_status()
+        if operation == "reorder_queue":
+            current_revision = self._control_api_queue_revision_value()
+            if payload.get("revision") != current_revision:
+                raise APIError(409, "stale_queue_revision",
+                               "The queue changed. Read it again before reordering.")
+            order = payload.get("order")
+            if (not isinstance(order, list) or len(order) != len(self.tracks)
+                    or any(type(index) is not int or index < 0 for index in order)
+                    or sorted(order) != list(range(len(self.tracks)))):
+                raise APIError(409, "invalid_order",
+                               "Order must be a complete permutation of the current queue positions.")
+            ordered_tracks = [(self.tracks[index], index) for index in order]
+            if not self.commit_playlist_order(ordered_tracks):
+                raise APIError(409, "queue_reorder_failed",
+                               "The queue could not be reordered.")
+            return self._control_api_queue()
+        raise APIError(404, "not_found", "Unsupported API operation.")
 
     def build_ui(self):
         root = QWidget()
@@ -273,7 +455,9 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         heading.addWidget(self.clock)
         self.on_air = OnAirPanel(self)
         heading.addWidget(self.on_air, 1)
-        settings_button = QPushButton("⚙ Configurações")
+        settings_button = QPushButton(translated_icon_label("⚙ Configurações", "⚙"))
+        settings_button.setIcon(ui_icon("settings"))
+        settings_button.setIconSize(QSize(24, 24))
         settings_button.clicked.connect(self.show_settings)
         heading.addWidget(settings_button, 0, Qt.AlignTop)
         main.addLayout(heading)
@@ -292,24 +476,32 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         browser_layout.setSpacing(3)
         navigation = QHBoxLayout()
         navigation.setSpacing(1)
-        for emoji, tooltip, handler in (
-                ("📁", "Escolher pasta de músicas", self.choose_explorer_folder),
-                ("💻", "Mostrar unidades deste computador", self.show_drives),
-                ("⬆️", "Pasta acima", self.explorer_up),
-                ("🏠", "Pasta de músicas", self.open_music_folder),
-                ("🔎", "Filtrar arquivos de áudio pelo nome", self.toggle_explorer_search)):
+        for icon_name, object_name, tooltip, handler in (
+                ("folder_open", "explorerChooseFolderButton", "Escolher pasta de músicas",
+                 self.choose_explorer_folder),
+                ("computer", "explorerDrivesButton", "Mostrar unidades deste computador",
+                 self.show_drives),
+                ("music_folder", "explorerMusicFolderButton", "Pasta de músicas",
+                 self.open_music_folder),
+                ("audio_search", "explorerAudioSearchButton",
+                 "Filtrar arquivos de áudio pelo nome", self.toggle_explorer_search)):
             button = QToolButton()
-            button.setText(emoji)
-            button.setFont(QFont("Segoe UI Emoji", 10))
-            button.setToolTip(tooltip)
+            button.setObjectName(object_name)
+            button.setIcon(explorer_icon(icon_name))
+            button.setIconSize(QSize(20, 20))
+            button.setToolTip(translate(tooltip))
+            button.setAccessibleName(translate(tooltip))
             button.setFixedSize(28, 25)
             button.setAutoRaise(True)
             button.clicked.connect(handler)
             navigation.addWidget(button)
         path_button = QToolButton()
-        path_button.setText("📍")
-        path_button.setFont(QFont("Segoe UI Emoji", 10))
-        path_button.setToolTip("Mostrar ou ocultar o caminho da pasta")
+        path_button.setObjectName("explorerPathButton")
+        path_button.setIcon(explorer_icon("folder_path"))
+        path_button.setIconSize(QSize(20, 20))
+        path_tooltip = translate("Mostrar ou ocultar o caminho da pasta")
+        path_button.setToolTip(path_tooltip)
+        path_button.setAccessibleName(path_tooltip)
         path_button.setFixedSize(28, 25)
         path_button.setAutoRaise(True)
         path_button.clicked.connect(self.toggle_explorer_path)
@@ -317,7 +509,7 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         navigation.addStretch()
         browser_layout.addLayout(navigation)
         self.explorer_search = QLineEdit()
-        self.explorer_search.setPlaceholderText("Filtrar arquivos por nome...")
+        self.explorer_search.setPlaceholderText(translate("Filtrar arquivos por nome..."))
         self.explorer_search.setClearButtonEnabled(True)
         self.explorer_search.textChanged.connect(self.filter_explorer)
         self.explorer_search.hide()
@@ -327,7 +519,7 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         self.explorer_filter_timer.setInterval(180)
         self.explorer_filter_timer.timeout.connect(self.apply_explorer_filter)
         self.explorer_path = QLineEdit()
-        self.explorer_path.setPlaceholderText("Caminho da pasta")
+        self.explorer_path.setPlaceholderText(translate("Caminho da pasta"))
         self.explorer_path.hide()
         self.explorer_path.returnPressed.connect(
             lambda: self.open_explorer_folder(self.explorer_path.text(), persist=True))
@@ -376,10 +568,11 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         self.explorer.doubleClicked.connect(self.explorer_double_clicked)
         browser_layout.addWidget(self.explorer, 1)
         self.explorer_path.setMaximumHeight(24)
-        self.explorer_path.setToolTip("Pasta principal exibida no explorador; digite um caminho e pressione Enter")
+        self.explorer_path.setToolTip(translate("Pasta principal exibida no explorador; digite um caminho e pressione Enter"))
         browser_layout.addWidget(self.explorer_path)
-        insert_button = QPushButton("➕ Adicionar seleção")
-        insert_button.setToolTip("Adiciona os arquivos de áudio selecionados à Now Playing")
+        insert_button = QPushButton(translated_icon_label("➕ Adicionar seleção", "➕"))
+        insert_button.setIcon(ui_icon("add"))
+        insert_button.setToolTip(translate("Adiciona os arquivos de áudio selecionados à Now Playing"))
         insert_button.clicked.connect(self.add_explorer_selection)
         browser_layout.addWidget(insert_button)
         explorer_splitter.addWidget(browser_panel)
@@ -389,13 +582,13 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         log_layout = QVBoxLayout(log_panel)
         log_layout.setContentsMargins(0, 3, 0, 0)
         log_layout.setSpacing(3)
-        log_heading = QLabel("📜 Histórico")
+        log_heading = QLabel(translated_icon_label("📜 Histórico", "📜"))
         heading_font = log_heading.font()
         heading_font.setBold(True)
         log_heading.setFont(heading_font)
         log_layout.addWidget(log_heading)
         self.event_log = QTableWidget(0, 2)
-        self.event_log.setHorizontalHeaderLabels(["Hora", "Evento / título"])
+        self.event_log.setHorizontalHeaderLabels([translate("Hora"), translate("Evento / título")])
         self.event_log.setColumnWidth(0, 68)
         self.event_log.horizontalHeader().setStretchLastSection(True)
         self.event_log.verticalHeader().hide()
@@ -411,21 +604,21 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         playlist_layout = QVBoxLayout(playlist_panel)
         self.playlist_layout = playlist_layout
         playlist_layout.setContentsMargins(0, 0, 0, 0)
-        playlist_layout.addWidget(QLabel("Now Playing"))
+        playlist_layout.addWidget(QLabel(translate("Now Playing")))
         toolbar = QGridLayout()
         for index, (label, handler) in enumerate([
                 ("+ Áudio", self.add_files), ("+ Pasta", self.add_folder),
                 ("Abrir", self.open_m3u), ("Salvar", self.save_m3u),
                 ("↑", lambda: self.move_track(-1)), ("↓", lambda: self.move_track(1)),
                 ("Remover", self.remove_track)]):
-            button = QPushButton(label)
+            button = QPushButton(translate(label))
             button.clicked.connect(handler)
             toolbar.addWidget(button, index // 4, index % 4)
         playlist_layout.addLayout(toolbar)
         self.playlist = PlaylistTable(self.add_audio_paths, self.commit_playlist_order,
                                       self.move_selected_tracks, self.remove_selected_tracks,
                                       restore_order=lambda: self.refresh_playlist(force=True))
-        self.playlist.setHorizontalHeaderLabels(["Título", "Artista", "Álbum"])
+        self.playlist.setHorizontalHeaderLabels([translate("Título"), translate("Artista"), translate("Álbum")])
         self.playlist.verticalHeader().setDefaultSectionSize(32)
         self.playlist.verticalHeader().setMinimumWidth(38)
         self.playlist.setColumnWidth(1, 115)
@@ -434,41 +627,53 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         self.playlist.setSelectionBehavior(QTableWidget.SelectRows)
         self.playlist.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.playlist.setToolTip(
-            "Arraste para reordenar • Ctrl+A seleciona tudo • Delete remove • Ctrl+↑/↓ move a seleção")
+            translate("Arraste para reordenar • Ctrl+A seleciona tudo • Delete remove • Ctrl+↑/↓ move a seleção"))
         self.playlist.setEditTriggers(QTableWidget.NoEditTriggers)
         self.playlist.doubleClicked.connect(self.play_selected)
         self.playlist.setContextMenuPolicy(Qt.CustomContextMenu)
         self.playlist.customContextMenuRequested.connect(self.playlist_menu)
         playlist_layout.addWidget(self.playlist)
         playlist_layout.addWidget(self.player_controls)
-        self.prelisten_button = QPushButton("🎧 Pré-escutar seleção")
+        self.prelisten_button = QPushButton(
+            translated_icon_label("🎧 Pré-escutar seleção", "🎧"))
+        self.prelisten_button.setIcon(ui_icon("headphones"))
+        self.prelisten_button.setIconSize(QSize(20, 20))
         self.prelisten_button.clicked.connect(self.toggle_prelisten)
         playlist_layout.addWidget(self.prelisten_button)
         splitter.addWidget(playlist_panel)
 
         tabs = QTabWidget()
+        tabs.setIconSize(QSize(20, 20))
         schedule_page = QWidget()
         schedule_layout = QVBoxLayout(schedule_page)
         event_buttons = QHBoxLayout()
         for label, handler in [("Adicionar", self.add_event), ("Editar", self.edit_event),
                                ("Excluir", self.delete_event), ("Executar agora", self.run_event)]:
-            button = QPushButton(label)
+            button = QPushButton(translate(label))
             button.clicked.connect(handler)
             event_buttons.addWidget(button)
         schedule_layout.addLayout(event_buttons)
-        self.schedule = QTableWidget(0, 4)
-        self.schedule.setHorizontalHeaderLabels(["Ativo", "Hora", "Dias", "Arquivo"])
+        self.schedule = QTableWidget(0, 6)
+        self.schedule.setHorizontalHeaderLabels([
+            translate("Ativo"), translate("Próxima execução"), translate("Repetição"),
+            translate("Ação"), translate("Conteúdo"), translate("Último resultado"),
+        ])
+        self.schedule.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.schedule.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.schedule.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.schedule.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
         self.schedule.horizontalHeader().setStretchLastSection(True)
         self.schedule.setSelectionBehavior(QTableWidget.SelectRows)
         self.schedule.setEditTriggers(QTableWidget.NoEditTriggers)
         schedule_layout.addWidget(self.schedule)
-        tabs.addTab(schedule_page, "📅 Agendador")
+        tabs.addTab(schedule_page, ui_icon("scheduler"),
+                    translated_icon_label("📅 Agendador", "📅"))
 
         cart_page = QWidget()
         cart_layout = QGridLayout(cart_page)
         self.cart_buttons = []
         for index in range(25):
-            button = QPushButton(f"Cart {index + 1}")
+            button = QPushButton(translate(f"Cart {index + 1}"))
             button.setMinimumHeight(68)
             button.clicked.connect(lambda checked=False, i=index: self.play_cart(i))
             button.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -476,24 +681,31 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
                 lambda point, i=index: self.cart_menu(i, point))
             cart_layout.addWidget(button, index // 5, index % 5)
             self.cart_buttons.append(button)
-        tabs.addTab(cart_page, "🎛️ Cart wall")
+        tabs.addTab(cart_page, ui_icon("cart_wall"),
+                    translated_icon_label("🎛️ Cart wall", "🎛️"))
         self.audio_inputs_panel = AudioInputsPanel(self.show_settings)
         self.audio_inputs_panel.input_toggled.connect(self.set_audio_input_active)
         inputs_scroll = QScrollArea()
         inputs_scroll.setWidgetResizable(True)
         inputs_scroll.setWidget(self.audio_inputs_panel)
-        tabs.addTab(inputs_scroll, "🎙 Entradas")
+        tabs.addTab(inputs_scroll, ui_icon("inputs"),
+                    translated_icon_label("🎙 Entradas", "🎙"))
         self.broadcast_panel = BroadcastPanel(self)
         broadcast_scroll = QScrollArea()
         broadcast_scroll.setWidgetResizable(True)
         broadcast_scroll.setWidget(self.broadcast_panel)
-        tabs.addTab(broadcast_scroll, "📡 Transmissão")
+        tabs.addTab(broadcast_scroll, ui_icon("broadcast"),
+                    translated_icon_label("📡 Transmissão", "📡"))
         self.autodj_panel = AutoDJPanel(self)
-        tabs.addTab(self.autodj_panel, "🤖 AutoDJ")
+        tabs.addTab(self.autodj_panel, ui_icon("autodj"),
+                    translated_icon_label("🤖 AutoDJ", "🤖"))
+        self.recording_panel = RecordingPanel(self)
+        tabs.addTab(self.recording_panel, ui_icon("recording"),
+                    translated_icon_label("⏺ Gravação", "⏺"))
         splitter.addWidget(tabs)
         splitter.setSizes([260, 620, 370])
         self.build_menu_bar()
-        self.statusBar().showMessage("Pronto")
+        self.statusBar().showMessage(translate("Pronto"))
         self.clock_timer = QTimer(self)
         self.clock_timer.timeout.connect(self.clock.update_time)
         self.clock_timer.timeout.connect(self.refresh_playback_display)
@@ -510,6 +722,22 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         layout.setContentsMargins(3, 3, 3, 3)
         layout.setSpacing(3)
         selected_cover_row = QHBoxLayout()
+        self.quick_microphone_button = QToolButton(panel)
+        self.quick_microphone_button.setObjectName("quickMicrophoneButton")
+        self.quick_microphone_button.setCheckable(True)
+        self.quick_microphone_button.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+        self.quick_microphone_button.setMinimumSize(90, 86)
+        microphone_label = translated_icon_label("🎙 Microfone", "🎙")
+        self.quick_microphone_button.setText(microphone_label)
+        self.quick_microphone_button.setAccessibleName(microphone_label)
+        self.quick_microphone_button.setToolTip(
+            translate("Ativar ou desativar {channel} no master").format(
+                channel=translate(INPUT_LABELS["microphone"])))
+        self.quick_microphone_button.setIcon(ui_icon("microphone"))
+        self.quick_microphone_button.setIconSize(QSize(38, 38))
+        self.quick_microphone_button.toggled.connect(
+            lambda checked: self.set_audio_input_active("microphone", checked))
+        selected_cover_row.addWidget(self.quick_microphone_button)
         selected_cover_row.addStretch(1)
         self.selected_cover_art = CoverArtLabel(
             112, panel, "da faixa selecionada na Now Playing")
@@ -517,27 +745,64 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         layout.addLayout(selected_cover_row)
         transport = QHBoxLayout()
         transport.setSpacing(4)
-        for label, handler in [("▶ Reproduzir", self.play_selected), ("⏸ Pausar", self.pause),
-                               ("⏹ Parar", self.stop), ("⏭ Próxima", self.next_track)]:
-            button = QPushButton(label)
+        transport_controls = [
+            ("▶ Reproduzir", "▶", self.play_selected, ui_icon("play")),
+            ("⏸ Pausar", "⏸", self.pause, ui_icon("pause")),
+            ("⏹ Parar", "⏹", self.stop, ui_icon("stop")),
+            ("⏭ Próxima", "⏭", self.next_track,
+             ui_icon("next")),
+        ]
+        for label, marker, handler, icon in transport_controls:
+            button = QPushButton(translated_icon_label(label, marker))
+            button.setIcon(icon)
+            button.setIconSize(QSize(22, 22))
             button.clicked.connect(handler)
             transport.addWidget(button)
         transport.addStretch(1)
-        transport.addWidget(QLabel("Volume"))
-        volume = QSlider(Qt.Horizontal)
-        volume.setRange(0, 100)
-        volume.setValue(80)
-        self.volume_slider = volume
-        volume.setFixedWidth(100)
-        volume.valueChanged.connect(self.set_master_volume)
-        transport.addWidget(volume)
         layout.addLayout(transport)
+        volume_row = QHBoxLayout()
+        volume_row.setSpacing(8)
+        volume_row.addWidget(QLabel(translate("Master Ao Vivo")))
+        self.master_live_volume_slider = QSlider(Qt.Horizontal)
+        self.master_live_volume_slider.setObjectName("masterLiveVolumeSlider")
+        self.master_live_volume_slider.setAccessibleName(translate("Volume do Master Ao Vivo"))
+        self.master_live_volume_slider.setRange(0, 100)
+        self.master_live_volume_slider.setValue(100)
+        self.master_live_volume_slider.setFixedWidth(100)
+        self.master_live_volume_slider.setToolTip(
+            translate("Nível enviado à transmissão: música, Cart Wall, auxiliares e microfone. "
+            "O Monitoramento também recebe este nível."))
+        self.master_live_volume_slider.valueChanged.connect(self.set_master_live_volume)
+        volume_row.addWidget(self.master_live_volume_slider)
+        self.master_live_volume_label = QLabel(translate("100%"))
+        volume_row.addWidget(self.master_live_volume_label)
+        self.master_live_volume_slider.valueChanged.connect(
+            lambda value: self.master_live_volume_label.setText(translate(f"{value}%")))
+        volume_row.addSpacing(10)
+        volume_row.addWidget(QLabel(translate("Monitoramento")))
+        self.monitor_volume_slider = QSlider(Qt.Horizontal)
+        self.monitor_volume_slider.setObjectName("monitorVolumeSlider")
+        self.monitor_volume_slider.setAccessibleName(translate("Volume do Monitoramento"))
+        self.monitor_volume_slider.setRange(0, 100)
+        self.monitor_volume_slider.setValue(80)
+        self.monitor_volume_slider.setFixedWidth(100)
+        self.monitor_volume_slider.setToolTip(
+            translate("Nível da escuta local pela saída de monitoramento. "
+            "Ajustar este controle não altera a transmissão."))
+        self.monitor_volume_slider.valueChanged.connect(self.set_monitor_volume)
+        volume_row.addWidget(self.monitor_volume_slider)
+        self.monitor_volume_label = QLabel(translate("80%"))
+        volume_row.addWidget(self.monitor_volume_label)
+        self.monitor_volume_slider.valueChanged.connect(
+            lambda value: self.monitor_volume_label.setText(translate(f"{value}%")))
+        volume_row.addStretch(1)
+        layout.addLayout(volume_row)
         timeline = QHBoxLayout()
         self.position = QSlider(Qt.Horizontal)
         self.position.setRange(0, 0)
         self.position.sliderMoved.connect(self.seek_main_player)
         timeline.addWidget(self.position, 1)
-        self.position_label = QLabel("00:00 / 00:00")
+        self.position_label = QLabel(translate("00:00 / 00:00"))
         timeline.addWidget(self.position_label)
         layout.addLayout(timeline)
         return panel
@@ -587,7 +852,7 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         if image is None or image.isNull():
             return
         dialog = QDialog(self)
-        dialog.setWindowTitle(title)
+        dialog.setWindowTitle(translate(title))
         apply_app_icon(dialog)
         available = self.screen().availableGeometry()
         max_width = max(200, min(900, available.width() - 80))
@@ -600,6 +865,7 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         preview.setPixmap(pixmap)
         layout.addWidget(preview)
         buttons = QDialogButtonBox(QDialogButtonBox.Close, dialog)
+        translate_dialog_buttons(buttons)
         buttons.rejected.connect(dialog.accept)
         buttons.accepted.connect(dialog.accept)
         layout.addWidget(buttons)
@@ -624,14 +890,14 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         bar.setNativeMenuBar(False)
 
         def add(menu, label, handler, shortcut=None):
-            action = QAction(label, self)
+            action = QAction(translate(label), self)
             if shortcut:
                 action.setShortcut(shortcut)
             action.triggered.connect(handler)
             menu.addAction(action)
             return action
 
-        files = bar.addMenu("&Arquivo")
+        files = bar.addMenu(translate("&Arquivo"))
         add(files, "Adicionar áudio...", self.add_files, "Ctrl+O")
         add(files, "Adicionar pasta...", self.add_folder)
         add(files, "Abrir playlist...", self.open_m3u)
@@ -641,19 +907,19 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         tray_action.setEnabled(QSystemTrayIcon.isSystemTrayAvailable())
         add(files, "Sair", self.request_exit, "Ctrl+Q")
 
-        playback = bar.addMenu("&Reprodução")
+        playback = bar.addMenu(translate("&Reprodução"))
         add(playback, "Reproduzir / Pausar", self.toggle_playback, "Ctrl+Space")
         add(playback, "Próxima faixa", self.next_track, "Ctrl+Right")
         add(playback, "Parar", self.stop)
 
-        transmission = bar.addMenu("&Transmissão")
+        transmission = bar.addMenu(translate("&Transmissão"))
         add(transmission, "Iniciar transmissão", self.broadcast_panel.start)
         add(transmission, "Parar transmissão", self.broadcast_panel.stop)
 
-        preferences = bar.addMenu("&Configurações")
+        preferences = bar.addMenu(translate("&Configurações"))
         add(preferences, "Preferências...", self.show_settings, "Ctrl+P")
 
-        help_menu = bar.addMenu("A&juda")
+        help_menu = bar.addMenu(translate("A&juda"))
         add(help_menu, "Manual do usuário", self.open_user_manual)
         help_menu.addSeparator()
         add(help_menu, f"Sobre o {APP_NAME}", self.show_about)
@@ -661,21 +927,21 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
     @guarded
     def open_user_manual(self):
         if not USER_MANUAL_FILE.is_file():
-            QMessageBox.warning(
-                self, "Manual não encontrado",
-                "O PDF do manual não está disponível. Reinstale ou atualize o RadioStudio.",
+            show_warning(
+                self, translate("Manual não encontrado"),
+                translate("O PDF do manual não está disponível. Reinstale ou atualize o RadioStudio."),
             )
             return
         if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(USER_MANUAL_FILE))):
-            QMessageBox.warning(
-                self, "Não foi possível abrir o manual",
-                "O Windows não encontrou um aplicativo padrão para arquivos PDF.",
+            show_warning(
+                self, translate("Não foi possível abrir o manual"),
+                translate("O Windows não encontrou um aplicativo padrão para arquivos PDF."),
             )
 
     @guarded
     def show_about(self):
         dialog = QDialog(self)
-        dialog.setWindowTitle("Sobre")
+        dialog.setWindowTitle(translate("Sobre"))
         apply_app_icon(dialog)
         dialog.setMinimumWidth(500)
         layout = QVBoxLayout(dialog)
@@ -691,18 +957,18 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
             layout.addWidget(logo)
 
         heading = QLabel(
-            f"<b>{APP_NAME}</b><br>"
-            f"<span style=\"color: #a8a8a8\">{APP_VERSION} · Automação de áudio para rádio</span>"
+            translate(f"<b>{APP_NAME}</b><br>"
+            f"<span style=\"color: #a8a8a8\">{APP_VERSION} · Automação de áudio para rádio</span>")
         )
         heading.setTextFormat(Qt.TextFormat.RichText)
         layout.addWidget(heading)
 
         credits = QLabel(
-            "Desenvolvido por <b>Raemi Labs</b><br>"
+            translate("Desenvolvido por <b>Raemi Labs</b><br>"
             "Autor: Raphael Cherfem Carlini<br>"
             "Apoiado e testado por Gabriel Sousa · "
             "<a href=\"mailto:contato@gabastt.shop\">contato@gabastt.shop</a><br>"
-            "© 2026 Raemi Labs"
+            "© 2026 Raemi Labs")
         )
         credits.setTextFormat(Qt.TextFormat.RichText)
         credits.setOpenExternalLinks(True)
@@ -712,24 +978,23 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         project_row = QHBoxLayout()
         project_info = QToolButton(dialog)
         project_info.setAutoRaise(True)
-        project_info.setIcon(dialog.style().standardIcon(
-            QStyle.StandardPixmap.SP_MessageBoxInformation))
-        project_info.setToolTip("Sobre o tipo de licença e o uso do código-fonte")
-        project_info.setAccessibleName("Informações sobre a licença do projeto")
+        project_info.setIcon(ui_icon("info"))
+        project_info.setToolTip(translate("Sobre o tipo de licença e o uso do código-fonte"))
+        project_info.setAccessibleName(translate("Informações sobre a licença do projeto"))
         project_info.clicked.connect(
-            lambda _checked=False: QMessageBox.information(
-                dialog, "Projeto source-available",
-                "O código-fonte está disponível para consulta e para os usos permitidos "
+            lambda _checked=False: show_information(
+                dialog, translate("Projeto source-available"),
+                translate("O código-fonte está disponível para consulta e para os usos permitidos "
                 "pela licença. O RadioStudio não é open source; uso comercial exige "
                 "autorização e uma licença separada. Consulte o botão Licença para ver "
-                "os termos completos.",
+                "os termos completos."),
             )
         )
         project_row.addWidget(project_info, 0, Qt.AlignmentFlag.AlignTop)
 
         project_details = QLabel(
-            "<b>Source-available:</b> código-fonte disponível sob licença própria; "
-            "este projeto não é open source. Uso comercial exige licença separada."
+            translate("<b>Source-available:</b> código-fonte disponível sob licença própria; "
+            "este projeto não é open source. Uso comercial exige licença separada.")
         )
         project_details.setTextFormat(Qt.TextFormat.RichText)
         project_details.setWordWrap(True)
@@ -737,10 +1002,11 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         layout.addLayout(project_row)
 
         links = QLabel(
-            "<b>Idioma:</b> disponível somente em Português nesta versão.<br>"
+            translate("<b>Idiomas:</b> Português (Brasil), Inglês (EUA), Espanhol (México), "
+            "Coreano, Japonês, Chinês Tradicional e Simplificado.<br>"
             f"<b>GitHub:</b> <a href=\"{PROJECT_REPOSITORY_URL}\">Repositório do projeto</a> · "
             f"<a href=\"{PROJECT_ISSUES_URL}\">relatar um problema</a><br>"
-            "<b>Contato:</b> <a href=\"mailto:raphael@raemi.xyz\">raphael@raemi.xyz</a>"
+            "<b>Contato:</b> <a href=\"mailto:raphael@raemi.xyz\">raphael@raemi.xyz</a>")
         )
         links.setTextFormat(Qt.TextFormat.RichText)
         links.setOpenExternalLinks(True)
@@ -748,10 +1014,11 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         layout.addWidget(links)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        translate_dialog_buttons(buttons)
         buttons.rejected.connect(dialog.accept)
         buttons.accepted.connect(dialog.accept)
         button_row = QHBoxLayout()
-        license_button = QPushButton("Licença", dialog)
+        license_button = QPushButton(translate("Licença"), dialog)
         license_button.clicked.connect(lambda _checked=False: self.show_license(dialog))
         button_row.addWidget(license_button)
         button_row.addStretch(1)
@@ -772,14 +1039,14 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
 
         owner = parent or self
         if license_text is None:
-            QMessageBox.warning(
-                owner, "Licença indisponível",
-                "Não foi possível carregar o arquivo de licença do programa.",
+            show_warning(
+                owner, translate("Licença indisponível"),
+                translate("Não foi possível carregar o arquivo de licença do programa."),
             )
             return
 
         license_dialog = QDialog(owner)
-        license_dialog.setWindowTitle("Licença")
+        license_dialog.setWindowTitle(translate("Licença"))
         apply_app_icon(license_dialog)
         license_dialog.setMinimumSize(720, 520)
         layout = QVBoxLayout(license_dialog)
@@ -789,6 +1056,7 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         layout.addWidget(text_view)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, license_dialog)
+        translate_dialog_buttons(buttons)
         buttons.rejected.connect(license_dialog.accept)
         buttons.accepted.connect(license_dialog.accept)
         layout.addWidget(buttons)
@@ -796,8 +1064,11 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
 
     @guarded
     def sync_discord_presence(self):
-        if not self.discord_client_id:
-            self.discord_presence.set_activity({})
+        if not self.discord_client_id or not self.discord_enabled:
+            # Rich Presence is disabled by default. Skip player, path, and tag
+            # work on every one-second UI tick until the user enables it.
+            if not self.discord_client_id:
+                self.discord_presence.set_activity({})
             return
 
         main_state = self.player.playbackState()
@@ -888,20 +1159,20 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
     def setup_tray(self):
         icon = app_icon()
         if icon.isNull():
-            icon = self.style().standardIcon(QStyle.SP_MediaPlay)
+            icon = ui_icon("play")
         self.setWindowIcon(icon)
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return
         self.tray_icon = QSystemTrayIcon(icon, self)
         self.tray_icon.setToolTip(APP_DISPLAY_NAME)
         tray_menu = QMenu(self)
-        tray_menu.addAction(f"Abrir {APP_NAME}", self.restore_window)
+        tray_menu.addAction(translate(f"Abrir {APP_NAME}"), self.restore_window)
         tray_menu.addSeparator()
-        tray_menu.addAction("Reproduzir / Pausar", self.toggle_playback)
-        tray_menu.addAction("Próxima faixa", self.next_track)
-        tray_menu.addAction("Parar", self.stop)
+        tray_menu.addAction(translate("Reproduzir / Pausar"), self.toggle_playback)
+        tray_menu.addAction(translate("Próxima faixa"), self.next_track)
+        tray_menu.addAction(translate("Parar"), self.stop)
         tray_menu.addSeparator()
-        tray_menu.addAction("Sair", self.request_exit)
+        tray_menu.addAction(translate("Sair"), self.request_exit)
         self.tray_icon.setContextMenu(tray_menu)
         self.tray_icon.activated.connect(self.tray_activated)
         self.tray_icon.show()

@@ -39,7 +39,8 @@ class _PipelineHarness(AudioPipelineMixin):
         self.mix_player = _Player(state=QMediaPlayer.StoppedState)
         self.main_gain = 0.75
         self.mix_gain = 0.0
-        self.master_volume = 0.2
+        self.monitor_volume = 0.2
+        self.master_live_volume = 1.0
         self.on_air = _OnAir()
         self.forwarded = []
 

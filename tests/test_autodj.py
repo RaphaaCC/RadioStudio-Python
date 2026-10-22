@@ -25,6 +25,18 @@ class AutoDJTests(unittest.TestCase):
                      "start": "not-a-time", "end": "01:00"}
         self.assertIsNone(active_program([malformed], datetime(2026, 10, 16, 0, 30)))
 
+    def test_malformed_enabled_text_does_not_activate_a_program(self):
+        malformed = {"enabled": "false", "days": list(range(7)),
+                     "start": "08:00", "end": "10:00"}
+
+        self.assertIsNone(active_program([malformed], datetime(2026, 10, 16, 9, 0)))
+
+    def test_malformed_weekday_entries_are_ignored(self):
+        block = {"enabled": True, "days": ["--1", None, 0],
+                 "start": "08:00", "end": "10:00"}
+
+        self.assertEqual(active_program([block], datetime(2026, 10, 19, 9, 0)), block)
+
     def test_filtering_by_tags_and_keywords(self):
         tracks = [
             {"path": "a", "title": "Noite Azul", "artist": "Lia", "album": "Ao Vivo", "genre": "Pop", "year": "2020"},
@@ -33,6 +45,13 @@ class AutoDJTests(unittest.TestCase):
         result = filter_tracks(tracks, {"genres": "Pop", "artists": "Lia",
                                        "include_keywords": "noite, ao vivo", "year_from": 2015,
                                        "keyword_fields": ["title", "album"]})
+        self.assertEqual(["a"], [track["path"] for track in result])
+
+    def test_exact_artist_filter_trims_metadata_whitespace(self):
+        tracks = [{"path": "a", "artist": "   ", "albumartist": " Lia "}]
+
+        result = filter_tracks(tracks, {"artists": "Lia"})
+
         self.assertEqual(["a"], [track["path"] for track in result])
 
     def test_year_filter_excludes_tracks_with_unknown_year(self):
@@ -91,6 +110,35 @@ class AutoDJTests(unittest.TestCase):
             self.assertEqual(store.latest_track_plays()[0][str(root / "Song One.mp3").casefold()], 1234)
             store.remove_library(library_id)
             self.assertEqual(store.recent_history()[0]["title"], "Song One")
+
+    def test_library_scan_enumerates_each_directory_once(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder) / "music"
+            nested = root / "artist" / "album"
+            nested.mkdir(parents=True)
+            (nested / "Song.mp3").write_bytes(b"audio")
+            store = MusicLibrary(Path(folder) / "library.sqlite3")
+            library_id = store.add_library("Music", str(root))
+            original_entries = MusicLibrary._entries
+            visited = []
+
+            def counted_entries(directory):
+                visited.append(str(directory.resolve()))
+                return original_entries(directory)
+
+            with patch.object(MusicLibrary, "_entries", side_effect=counted_entries):
+                self.assertEqual(store.scan_library(library_id), (1, 0, 0))
+
+            self.assertEqual(len(visited), 3)
+            self.assertEqual(len(set(visited)), len(visited))
+
+    def test_library_directory_entries_are_streamed(self):
+        with tempfile.TemporaryDirectory() as folder:
+            entries = MusicLibrary._entries(Path(folder))
+            try:
+                self.assertIs(iter(entries), entries)
+            finally:
+                entries.close()
 
     def test_history_after_id_only_returns_newer_play_ids(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -207,6 +255,24 @@ class AutoDJTests(unittest.TestCase):
             self.assertEqual(
                 [track["path"] for track in store.tracks_for_libraries([library_id])],
                 [str(old_track.resolve())])
+
+    def test_complete_scan_removes_tracks_deleted_from_the_library(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder) / "music"
+            root.mkdir()
+            old_track = root / "Old.mp3"
+            old_track.write_bytes(b"old audio")
+            store = MusicLibrary(Path(folder) / "library.sqlite3")
+            library_id = store.add_library("Music", str(root))
+            self.assertEqual(store.scan_library(library_id), (1, 0, 0))
+
+            old_track.unlink()
+            new_track = root / "New.mp3"
+            new_track.write_bytes(b"new audio")
+            self.assertEqual(store.scan_library(library_id), (1, 0, 0))
+            self.assertEqual(
+                [track["path"] for track in store.tracks_for_libraries([library_id])],
+                [str(new_track.resolve())])
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 
 from ._shared import *
 from ..runtime_safety import guarded
+from ..i18n import translate
 from ..services.audio_paths import same_audio_path
 
 CART_GAIN = 0.8
@@ -13,13 +14,13 @@ class CartWallMixin:
         if not 0 <= index < min(len(self.carts), len(self.cart_buttons)):
             return
         menu = QMenu(self)
-        assign = menu.addAction("Atribuir áudio...")
-        clear = menu.addAction("Limpar")
+        assign = menu.addAction(translate("Atribuir áudio..."))
+        clear = menu.addAction(translate("Limpar"))
         button = self.cart_buttons[index]
         anchor = position if position is not None else button.rect().bottomLeft()
         chosen = menu.exec(button.mapToGlobal(anchor))
         if chosen == assign:
-            path, _ = QFileDialog.getOpenFileName(self, "Áudio do cart", "", AUDIO_FILTER)
+            path, _ = QFileDialog.getOpenFileName(self, translate("Áudio do cart"), "", translate(AUDIO_FILTER))
             if path:
                 self.carts[index] = path
         elif chosen == clear:
@@ -28,9 +29,10 @@ class CartWallMixin:
         self.save_state()
 
     def cart_local_volume(self):
-        master = max(0.0, min(1.0, float(getattr(self, "master_volume", 1.0))))
+        master = max(0.0, min(1.0, float(getattr(self, "master_live_volume", 1.0))))
+        monitor = max(0.0, min(1.0, float(getattr(self, "monitor_volume", 1.0))))
         duck = max(0.0, min(1.0, float(getattr(self, "music_duck_gain", 1.0))))
-        return master * CART_GAIN * duck
+        return master * monitor * CART_GAIN * duck
 
     @guarded
     def apply_cart_local_volume(self):
@@ -47,8 +49,9 @@ class CartWallMixin:
                 self.cart_buttons[index].setToolTip("\n".join(filter(None, (
                     path, metadata.artist, metadata.album))))
             else:
-                self.cart_buttons[index].setText(f"Cart {index + 1}")
-                self.cart_buttons[index].setToolTip("Clique com o botão direito para atribuir áudio")
+                self.cart_buttons[index].setText(translate(f"Cart {index + 1}"))
+                self.cart_buttons[index].setToolTip(
+                    translate("Clique com o botão direito para atribuir áudio"))
 
     @guarded
     def play_cart(self, index):
@@ -59,7 +62,7 @@ class CartWallMixin:
             self.cart_menu(index)
             return
         if not Path(path).is_file():
-            QMessageBox.warning(self, "Arquivo ausente", path)
+            show_warning(self, translate("Arquivo ausente"), path)
             return
         player = QMediaPlayer(self)
         output = QAudioOutput(self)
