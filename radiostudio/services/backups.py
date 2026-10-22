@@ -421,6 +421,19 @@ def _salvage_database(source: Path, target: Path) -> tuple[int, list[str]]:
                    "albumartist", "genre", "year", "composer", "duration"),
         "play_history": ("id", "played_at", "path", "title", "artist", "album",
                          "albumartist", "genre", "year", "composer", "duration"),
+        "metadata_overrides": ("path_key", "path", "fields_json", "custom_tags_json",
+                               "cover_mime", "cover_data", "updated_at"),
+        "library_collections": ("id", "name", "kind", "criteria_json", "created_at",
+                                "updated_at"),
+        "collection_tracks": ("collection_id", "path_key", "path"),
+        "track_tags": ("path_key", "path", "tag"),
+        "rotation_groups": ("id", "name", "weight", "created_at"),
+        "track_rotation_groups": ("path_key", "path", "group_id"),
+        "metadata_history": ("id", "path_key", "path", "target", "created_at",
+                             "before_json", "after_json"),
+        "pending_tag_writes": ("path_key", "path", "fields_json", "custom_tags_json",
+                                "cover_mime", "cover_data", "clear_cover",
+                                "preserve_overlay", "queued_at"),
     }
     recovered = 0
     errors = []

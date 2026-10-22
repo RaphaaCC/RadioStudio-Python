@@ -74,7 +74,10 @@ class _FolderScanWorker(QRunnable):
 class PlaylistMixin:
     def _set_playlist_row(self, playlist, row, path):
         metadata = getattr(self, "_playlist_metadata_overrides", {}).pop(path, None)
-        if metadata is None:
+        metadata = getattr(self, "_playlist_render_metadata", {}).pop(path, metadata)
+        if metadata is None and hasattr(self, "music_library"):
+            metadata = self.music_library.metadata_for_track(path)
+        elif metadata is None:
             metadata = read_track_metadata(path)
         for column, value in enumerate((metadata.title, metadata.artist, metadata.album)):
             item = QTableWidgetItem(value)
@@ -116,8 +119,12 @@ class PlaylistMixin:
             else:
                 playlist.setRowCount(len(paths))
                 first_new_row = 0
+            if hasattr(self, "music_library"):
+                self._playlist_render_metadata = self.music_library.metadata_for_tracks(
+                    paths[first_new_row:])
             for row in range(first_new_row, len(paths)):
                 self._set_playlist_row(playlist, row, paths[row])
+            self._playlist_render_metadata = {}
             if 0 <= self.current_index < len(self.tracks):
                 playlist.selectRow(self.current_index)
             self._rendered_playlist_paths = paths

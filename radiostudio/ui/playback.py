@@ -13,6 +13,12 @@ _logger = logging.getLogger("radiostudio")
 MAX_TRANSITION_ANALYSES = 256
 
 
+def _metadata_for_track(window, path):
+    library = getattr(window, "music_library", None)
+    getter = getattr(library, "metadata_for_track", None)
+    return getter(path) if callable(getter) else read_track_metadata(path)
+
+
 class PlaybackMixin:
     def publish_track_title(self, metadata):
         title = format_broadcast_title(
@@ -227,7 +233,7 @@ class PlaybackMixin:
         self.apply_main_volume()
         self.set_media_source(self.player, path)
         self.pending_resume_position = max(0, int(resume_position_ms)) or None
-        metadata = read_track_metadata(path)
+        metadata = _metadata_for_track(self, path)
         self._display_sync_path = path
         self._display_sync_metadata = metadata
         self.pending_track_log = metadata.display_title
@@ -681,7 +687,7 @@ class PlaybackMixin:
         # next file's tags until the current track is inside that window.
         if remaining > transition_ms:
             return
-        next_duration = read_track_metadata(next_path).duration
+        next_duration = _metadata_for_track(self, next_path).duration
         transition_ms = bounded_transition_duration_ms(
             transition_ms, duration, remaining, round(next_duration * 1000))
         if remaining <= transition_ms:
@@ -722,7 +728,7 @@ class PlaybackMixin:
         outgoing_remaining = self.player.duration() - self.player.position()
         if outgoing_remaining <= 0:
             return
-        incoming_duration = read_track_metadata(path).duration
+        incoming_duration = _metadata_for_track(self, path).duration
         duration_ms = bounded_transition_duration_ms(
             requested_duration, self.player.duration(), outgoing_remaining,
             round(incoming_duration * 1000))
@@ -796,7 +802,7 @@ class PlaybackMixin:
         # Commit the visible track state immediately after the deck swap. Audio
         # device and broadcast cleanup are independent and must not leave the
         # interface showing the outgoing track if one of them fails.
-        metadata = read_track_metadata(self.tracks[self.current_index])
+        metadata = _metadata_for_track(self, self.tracks[self.current_index])
         self._display_sync_path = self.tracks[self.current_index]
         self._display_sync_metadata = metadata
         self.pending_track_log = metadata.display_title
@@ -964,7 +970,7 @@ class PlaybackMixin:
         cached_path = getattr(self, "_display_sync_path", "")
         metadata = getattr(self, "_display_sync_metadata", None)
         if not same_audio_path(cached_path, path) or metadata is None:
-            metadata = read_track_metadata(path)
+            metadata = _metadata_for_track(self, path)
             self._display_sync_path = path
             self._display_sync_metadata = metadata
         if not same_audio_path(getattr(self.on_air, "_track_path", ""), path):

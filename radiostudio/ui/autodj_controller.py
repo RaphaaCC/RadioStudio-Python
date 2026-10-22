@@ -39,12 +39,35 @@ class _AutoDJFillWorker(QRunnable):
         request = self.request
         try:
             program = request["program"]
-            candidates = self.library.tracks_for_libraries(request["library_ids"])
+            sources = request.get("sources", [])
+            if sources:
+                sources = [
+                    dict(source) for source in sources
+                    if isinstance(source, dict)
+                    and source.get("type") in {"library", "collection", "group", "tag"}
+                    and str(source.get("id", "")).strip()
+                ]
+                selected_library_sources = {
+                    str(source.get("id", "")) for source in sources
+                    if source.get("type") == "library"
+                }
+                sources.extend({"type": "library", "id": str(library_id), "weight": 1.0}
+                               for library_id in request.get("library_ids", [])
+                               if str(library_id) not in selected_library_sources)
+            candidates = (self.library.tracks_for_sources(sources) if sources
+                          else self.library.tracks_for_libraries(request["library_ids"]))
+            if not sources:
+                apply_overrides = getattr(self.library, "apply_metadata_overrides", None)
+                if callable(apply_overrides):
+                    candidates = apply_overrides(candidates)
             candidates = filter_tracks(candidates, program.get("filters", {}) if program else {})
             if not candidates:
                 name = request["program_name"]
-                message = (f"O bloco ‘{name}’ não encontrou faixas. Confira filtros e bibliotecas."
-                           if program else "As bibliotecas ainda não têm faixas indexadas.")
+                message = (
+                    translate("O bloco ‘{program_name}’ não encontrou faixas. Confira as fontes e os filtros.")
+                    .format(program_name=name)
+                    if program else translate(
+                        "A Biblioteca não tem faixas indexadas nas pastas habilitadas para o AutoDJ."))
                 self.signals.finished.emit({"status": message, "candidate_count": 0})
                 return
 
@@ -114,9 +137,25 @@ class AutoDJControllerMixin:
         requested_ids = list(dict.fromkeys(
             str(value) for value in requested_ids if value is not None and str(value)
         ))
-        selected_ids = sorted(
-            enabled_ids.intersection(requested_ids) if requested_ids else enabled_ids)
-        return program, selected_ids, bool(requested_ids)
+        sources = program.get("sources", []) if program else []
+        if not isinstance(sources, (list, tuple)):
+            sources = []
+        sources = [
+            source for source in sources
+            if isinstance(source, dict)
+            and source.get("type") in {"library", "collection", "group", "tag"}
+            and str(source.get("id", "")).strip()
+        ]
+        if requested_ids:
+            selected_ids = sorted(enabled_ids.intersection(requested_ids))
+        elif sources:
+            # An explicit collection, group, tag, or weighted source selection
+            # can stand on its own. Only an empty block selection means all
+            # enabled indexed folders.
+            selected_ids = []
+        else:
+            selected_ids = sorted(enabled_ids)
+        return program, selected_ids, bool(requested_ids or sources)
 
     def current_autodj_signature(self):
         program, selected_ids, _has_requested_libraries = self._autodj_selection()
@@ -199,12 +238,21 @@ class AutoDJControllerMixin:
             else:
                 self._clear_generated_autodj_tracks()
                 self.autodj_last_signature = signature
-        program_name = str(program.get("name") or "Bloco musical") if program else "Aleatório — todas as bibliotecas"
-        if not selected_ids:
+        program_name = (str(program.get("name") or translate("Bloco")) if program
+                        else translate("Aleatório — Biblioteca completa"))
+        selected_sources = (program.get("sources", []) if program
+                            and isinstance(program.get("sources", []), (list, tuple)) else [])
+        selected_sources = [
+            source for source in selected_sources
+            if isinstance(source, dict)
+            and source.get("type") in {"library", "collection", "group", "tag"}
+            and str(source.get("id", "")).strip()
+        ]
+        if not selected_ids and not selected_sources:
             self.autodj_panel.set_status(
-                "O bloco não tem bibliotecas habilitadas; ajuste sua seleção."
+                "As pastas selecionadas para este bloco estão desabilitadas ou indisponíveis; ajuste a seleção."
                 if has_requested_libraries
-                else "Adicione e examine pelo menos uma biblioteca habilitada.")
+                else "Ative ao menos uma pasta indexada da Biblioteca para usar o AutoDJ.")
             return
 
         if self.current_index >= 0:
@@ -222,7 +270,8 @@ class AutoDJControllerMixin:
             # The scheduler checks once per second and queue filling is
             # throttled to ten seconds. Avoid loading every indexed track
             # and aggregating the play-history database when the queue is full.
-            self.autodj_panel.set_status(f"{program_name}: fila completa")
+            self.autodj_panel.set_status(translate("{program_name}: fila completa").format(
+                program_name=program_name))
             return
 
         request = {
@@ -231,6 +280,7 @@ class AutoDJControllerMixin:
             "tracks": tuple(self.tracks),
             "track_sources": tuple(self.track_sources),
             "library_ids": list(selected_ids),
+            "sources": deepcopy(selected_sources),
             "program": deepcopy(program) if program else None,
             "program_name": program_name,
             "config": {
@@ -299,10 +349,11 @@ class AutoDJControllerMixin:
             return
 
         if "error" in result:
-            self.autodj_panel.set_status("Falha ao carregar a biblioteca do AutoDJ.")
+            self.autodj_panel.set_status("Falha ao carregar o catálogo da Biblioteca para o AutoDJ.")
             log_event = getattr(self, "log_event", None)
             if callable(log_event):
-                log_event("error", f"Falha ao completar a fila do AutoDJ: {result['error']}")
+                log_event("error", translate(
+                    "Falha ao completar a fila do AutoDJ: {error}").format(error=result["error"]))
             added_paths = []
         elif "status" in result:
             self.autodj_panel.set_status(result["status"])
@@ -318,9 +369,10 @@ class AutoDJControllerMixin:
                 if self.current_index < 0:
                     self.playlist.selectRow(0)
             notes = result.get("notes", ())
-            label = translate(
-                f"{request['program_name']}: {len(added_paths)} faixa(s) adicionada(s)"
-                if added_paths else f"{request['program_name']}: fila atualizada")
+            label = translate("{program_name}: {count} faixa(s) adicionada(s)").format(
+                program_name=request["program_name"], count=len(added_paths)) if added_paths else (
+                    translate("{program_name}: fila atualizada").format(
+                        program_name=request["program_name"]))
             if notes:
                 label += " • " + translate(notes[0])
             elif result.get("needed") and result.get("candidate_count", 0) <= result.get("queue_target", 0):
@@ -381,7 +433,9 @@ class AutoDJControllerMixin:
             if path == getattr(self, "_display_sync_path", ""):
                 metadata = getattr(self, "_display_sync_metadata", None)
             if metadata is None:
-                metadata = read_track_metadata(path)
+                library = getattr(self, "music_library", None)
+                getter = getattr(library, "metadata_for_track", None)
+                metadata = getter(path) if callable(getter) else read_track_metadata(path)
             self.music_library.record_play(metadata)
             if hasattr(self, "autodj_panel"):
                 self.autodj_panel.schedule_history_refresh()

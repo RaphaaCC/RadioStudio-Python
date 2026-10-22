@@ -94,7 +94,8 @@ class AudioPipelineMixin:
         if getattr(self, "_silence_next_duration_path", None) != next_path:
             self._silence_next_duration_path = next_path
             try:
-                self._silence_next_duration = read_track_metadata(next_path).duration
+                metadata_getter = getattr(self, "_metadata_for_track", read_track_metadata)
+                self._silence_next_duration = metadata_getter(next_path).duration
             except (OSError, ValueError, TypeError):
                 self._silence_next_duration = 0.0
         next_duration = getattr(self, "_silence_next_duration", 0.0)

@@ -78,7 +78,8 @@ class SettingsDialog(QDialog):
                  control_api_config: dict | None = None,
                  control_api_username: str = "",
                  control_api_password_configured: bool = False,
-                 control_api_token: str = ""):
+                 control_api_token: str = "",
+                 metadata_edit_default_target: str = "internal"):
         super().__init__(parent)
         apply_app_icon(self)
         self.setWindowTitle(translate("Configurações"))
@@ -687,6 +688,14 @@ class SettingsDialog(QDialog):
         metadata_form.addRow(translate("Título no ar"), self.title_format)
         metadata_form.addRow(translate("Frequência de envio"), self.metadata_update_mode)
         metadata_form.addRow(translate("Intervalo"), self.metadata_update_interval)
+        self.metadata_edit_target = QComboBox()
+        self.metadata_edit_target.addItem(
+            translate("Metadados internos do RadioStudio (SQLite)"), "internal")
+        self.metadata_edit_target.addItem(translate("Gravar tags no arquivo"), "file")
+        target_index = self.metadata_edit_target.findData(metadata_edit_default_target)
+        self.metadata_edit_target.setCurrentIndex(target_index if target_index >= 0 else 0)
+        metadata_form.addRow(translate("Destino padrão para edição de metadados"),
+                             self.metadata_edit_target)
         self.metadata_update_interval.setEnabled(
             self.metadata_update_mode.currentData() == "interval")
         self.metadata_update_mode.currentIndexChanged.connect(
@@ -972,4 +981,5 @@ class SettingsDialog(QDialog):
                 self.discord_button2_url.text().strip(),
                 self.process_priority.currentData(), self.backup_directory.text().strip(),
                 self.backup_periodic_enabled.isChecked(), self.backup_interval.currentData(),
-                self.backup_retention.value(), self.language_preference.currentData())
+                self.backup_retention.value(), self.language_preference.currentData(),
+                self.metadata_edit_target.currentData())

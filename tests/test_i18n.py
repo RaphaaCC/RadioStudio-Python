@@ -228,18 +228,25 @@ class TranslationCatalogTests(unittest.TestCase):
 
     def test_autodj_feedback_is_catalogued_in_every_language(self):
         sources = (
-            "Falha ao carregar a biblioteca do AutoDJ.",
-            "As bibliotecas ainda não têm faixas indexadas.",
-            "Adicione e examine pelo menos uma biblioteca habilitada.",
-            "O bloco não tem bibliotecas habilitadas; ajuste sua seleção.",
+            "Falha ao carregar o catálogo da Biblioteca para o AutoDJ.",
+            "A Biblioteca não tem faixas indexadas nas pastas habilitadas para o AutoDJ.",
+            "Ative ao menos uma pasta indexada da Biblioteca para usar o AutoDJ.",
+            "As pastas selecionadas para este bloco estão desabilitadas ou indisponíveis; ajuste a seleção.",
             "Sem faixas inéditas na fila; aguardando a reprodução avançar.",
-            "Nenhuma faixa disponível para os filtros e bibliotecas selecionados.",
+            "Nenhuma faixa disponível para as fontes e os filtros selecionados.",
             "A janela de repetição de artista foi flexibilizada: a biblioteca tem poucas opções.",
             "A janela de repetição da faixa foi flexibilizada: a biblioteca tem poucas opções.",
             "As janelas de repetição foram flexibilizadas: a biblioteca tem poucas opções.",
             "Todas as faixas estão dentro da janela de repetição.",
             "Os arquivos candidatos desapareceram; examine novamente as bibliotecas.",
             "biblioteca pequena; evitei repetir faixas na fila",
+            "Sem um bloco de programação ativo, o AutoDJ usa o catálogo inteiro da Biblioteca: todas as pastas indexadas e habilitadas para o AutoDJ. Em cada bloco, você pode limitar as faixas a pastas indexadas, coleções, grupos ou etiquetas; os filtros refinam essa seleção.",
+            "Configure pastas indexadas e blocos de programação",
+            "Todas as pastas habilitadas para o AutoDJ",
+            "Pasta indisponível ({id})",
+            "{program_name}: fila completa",
+            "{program_name}: {count} faixa(s) adicionada(s)",
+            "{program_name}: fila atualizada",
         )
         for locale, catalog in self.catalogs.items():
             for source in sources:
@@ -251,6 +258,10 @@ class TranslationCatalogTests(unittest.TestCase):
                          "Aleatório: queue updated")
         self.assertEqual(translate("Aleatório: 4 faixa(s) adicionada(s)", "en_US"),
                          "Aleatório: 4 track(s) added")
+        self.assertEqual(
+            translate("{program_name}: {count} faixa(s) adicionada(s)", "en_US").format(
+                program_name="Evening", count=2),
+            "Evening: 2 track(s) added")
 
     def test_dynamic_clock_hint_uses_the_selected_catalog(self):
         from radiostudio.ui.studio_widgets import StudioClock

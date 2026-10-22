@@ -39,7 +39,7 @@ class SettingsDialogRegressionTests(unittest.TestCase):
         try:
             self.assertEqual(dialog.backup_directory.text(), "C:/Backups")
             self.assertTrue(dialog.backup_interval.isEnabled())
-            self.assertEqual(dialog.values()[-5:], ("C:/Backups", True, 21600, 25, "system"))
+            self.assertEqual(dialog.values()[-6:], ("C:/Backups", True, 21600, 25, "system", "internal"))
         finally:
             dialog.close()
             dialog.deleteLater()

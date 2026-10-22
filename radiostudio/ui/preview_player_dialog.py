@@ -93,8 +93,8 @@ class PreviewPlayerDialog(QDialog):
         self.player.errorOccurred.connect(self.show_error)
 
     @guarded
-    def load_track(self, path: str) -> None:
-        metadata = read_track_metadata(path)
+    def load_track(self, path: str, metadata=None) -> None:
+        metadata = metadata or read_track_metadata(path)
         self.title_label.setText(metadata.title or Path(path).stem)
         details = " — ".join(value for value in (metadata.artist, metadata.album) if value)
         self.details_label.setText(details or Path(path).name)

@@ -30,6 +30,7 @@ from .audio_inputs import AudioInputsControllerMixin
 from .persistence import PersistenceMixin
 from .recording_controller import RecordingControllerMixin
 from .autodj_panel import AutoDJPanel
+from .library_panel import LibraryPanel
 from .autodj_controller import AutoDJControllerMixin
 from .preview_player_dialog import PreviewPlayerDialog
 from ..services.music_library import MusicLibrary
@@ -125,6 +126,7 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         self.station_metadata = DEFAULT_STATION_METADATA.copy()
         self.metadata_update_mode = "current"
         self.metadata_update_interval_seconds = 30
+        self.metadata_edit_default_target = "internal"
         self.explorer_folder = ""
         self.pending_track_log = None
         self.minimize_to_tray = True
@@ -696,6 +698,8 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         broadcast_scroll.setWidget(self.broadcast_panel)
         tabs.addTab(broadcast_scroll, ui_icon("broadcast"),
                     translated_icon_label("📡 Transmissão", "📡"))
+        self.library_panel = LibraryPanel(self)
+        tabs.addTab(self.library_panel, ui_icon("libraries"), translate("Biblioteca"))
         self.autodj_panel = AutoDJPanel(self)
         tabs.addTab(self.autodj_panel, ui_icon("autodj"),
                     translated_icon_label("🤖 AutoDJ", "🤖"))
@@ -813,6 +817,13 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         self.on_air.cover_art.set_cover_image(None)
         self.broadcast.set_cover_art(None)
         if path:
+            self.request_track_cover(path)
+
+    def request_track_cover(self, path):
+        override = self.music_library.read_metadata_override(path)
+        if override.get("cover_data"):
+            self.cover_art_loader.request(path, override["cover_data"], override["cover_mime"])
+        else:
             self.cover_art_loader.request(path)
 
     @guarded
@@ -822,7 +833,7 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         path = str(item.data(Qt.UserRole) or "") if item else ""
         self.selected_cover_art.set_cover_image(None)
         if path:
-            self.cover_art_loader.request(path)
+            self.request_track_cover(path)
 
     @guarded
     def apply_cover_art(self, path: str, artwork):
@@ -1088,7 +1099,9 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
             path_key = audio_path_key(track_path)
             metadata = self._discord_metadata_cache.get(path_key)
             if metadata is None:
-                metadata = read_track_metadata(track_path)
+                library = getattr(self, "music_library", None)
+                getter = getattr(library, "metadata_for_track", None)
+                metadata = getter(track_path) if callable(getter) else read_track_metadata(track_path)
                 # Rich Presence is refreshed every second. Keep a small cache so
                 # tag parsing and filesystem access happen once per track, not
                 # once per UI tick. Queue edits and removals can visit many

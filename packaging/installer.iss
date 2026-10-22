@@ -115,7 +115,7 @@ end;
 
 procedure InitializeWizard;
 var
-  SavedLanguage: String;
+  SavedLanguage: AnsiString;
   Index: Integer;
 begin
   AppLanguagePage := CreateInputOptionPage(wpSelectDir,

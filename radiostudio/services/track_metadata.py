@@ -38,6 +38,8 @@ class TrackMetadata:
     track: str = ""
     composer: str = ""
     duration: float = 0.0
+    comments: str = ""
+    lyrics: str = ""
 
     @property
     def display_title(self) -> str:
@@ -67,6 +69,8 @@ def _read_cached(path: str, modified_ns: int, size: int) -> TrackMetadata:
             track=_value(tag.track),
             composer=_value(tag.composer),
             duration=duration,
+            comments=_value(getattr(tag, "comment", "")),
+            lyrics=_value(getattr(tag, "lyrics", "")),
         )
     except Exception:
         # A damaged or unsupported tag must not prevent the playlist/library

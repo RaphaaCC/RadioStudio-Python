@@ -44,7 +44,7 @@ class CartWallMixin:
     def refresh_carts(self):
         for index, path in enumerate(self.carts):
             if path:
-                metadata = read_track_metadata(path)
+                metadata = self.music_library.metadata_for_track(path)
                 self.cart_buttons[index].setText(metadata.title[:20])
                 self.cart_buttons[index].setToolTip("\n".join(filter(None, (
                     path, metadata.artist, metadata.album))))

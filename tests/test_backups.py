@@ -11,6 +11,7 @@ from radiostudio.services.backups import (
     BackupError, create_backup, import_backup, repair_database, validate_backup,
 )
 from radiostudio.services.music_library import MusicLibrary
+from radiostudio.services.track_metadata import TrackMetadata
 
 
 class BackupServiceTests(unittest.TestCase):
@@ -84,6 +85,35 @@ class BackupServiceTests(unittest.TestCase):
         self.assertTrue((result.recovery_directory / "state.json").is_file())
         restored = MusicLibrary(self.database_file)
         self.assertEqual([item["name"] for item in restored.libraries()], ["Acervo"])
+
+    def test_backup_restores_library_overlays_collections_tags_groups_and_history(self):
+        track_path = self.media / "Track.mp3"
+        track_path.write_bytes(b"placeholder media")
+        library_id = self.library.libraries()[0]["id"]
+        self.assertEqual(self.library.scan_library(library_id), (1, 0, 0))
+        self.library.save_metadata(str(track_path), {"title": "Backed up title"},
+                                   target="internal")
+        self.library.set_track_tags(str(track_path), ["rotation", "favorite"])
+        collection_id = self.library.save_collection(
+            "Favorites", kind="manual", paths=[str(track_path)])
+        group_id = self.library.save_rotation_group("Evening", 2.5)
+        self.library.set_track_rotation_groups(str(track_path), [group_id])
+        self.library.record_play(TrackMetadata(
+            path=str(track_path), title="Backed up title", artist="Artist"), played_at=456)
+        backup = self._backup().path
+
+        self.library.save_metadata(str(track_path), {"title": "Changed after backup"},
+                                   target="internal")
+        self.library.set_track_tags(str(track_path), ["changed"])
+        import_backup(backup, self.state_file, self.database_file, self.recovery)
+
+        restored = MusicLibrary(self.database_file)
+        self.assertEqual(restored.metadata_for_track(str(track_path)).title, "Backed up title")
+        self.assertEqual(restored.tags_for_track(str(track_path)), ["favorite", "rotation"])
+        self.assertEqual(restored.track_organization(str(track_path))["collections"],
+                         [collection_id])
+        self.assertEqual(restored.track_organization(str(track_path))["groups"], [group_id])
+        self.assertEqual(restored.recent_history()[0]["played_at"], 456.0)
 
     def test_invalid_import_leaves_current_profile_intact(self):
         invalid = self.root / "invalid.zip"

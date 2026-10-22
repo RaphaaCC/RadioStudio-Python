@@ -141,7 +141,7 @@ class AutoDJQueueRegressionTests(unittest.TestCase):
             AutoDJControllerMixin.fill_autodj_queue(player, force=True)
 
         self.assertEqual(player.autodj_panel.status,
-                         "O bloco não tem bibliotecas habilitadas; ajuste sua seleção.")
+                         "As pastas selecionadas para este bloco estão desabilitadas ou indisponíveis; ajuste a seleção.")
 
     def test_legacy_integer_library_id_matches_sqlite_text_id(self):
         class Library:
@@ -160,6 +160,70 @@ class AutoDJQueueRegressionTests(unittest.TestCase):
         self.assertIs(selected_program, block)
         self.assertEqual(selected_ids, ["7"])
         self.assertTrue(has_requested)
+
+    def test_schedule_block_can_select_collection_without_all_library_folders(self):
+        class Library:
+            @staticmethod
+            def libraries():
+                return [
+                    {"id": "music", "enabled": True},
+                    {"id": "talk", "enabled": True},
+                ]
+
+        block = {"id": "favorites", "library_ids": [],
+                 "sources": [{"type": "collection", "id": "favorites", "weight": 1}]}
+        player = AutoDJControllerMixin()
+        player.music_library = Library()
+        player.autodj_programs = [block]
+
+        with patch("radiostudio.ui.autodj_controller.active_program", return_value=block):
+            selected_program, selected_ids, has_requested = player._autodj_selection()
+
+        self.assertIs(selected_program, block)
+        self.assertEqual(selected_ids, [])
+        self.assertTrue(has_requested)
+
+    def test_schedule_block_without_explicit_sources_defaults_to_enabled_folders(self):
+        class Library:
+            @staticmethod
+            def libraries():
+                return [
+                    {"id": "music", "enabled": True},
+                    {"id": "talk", "enabled": True},
+                    {"id": "archived", "enabled": False},
+                ]
+
+        block = {"id": "all-music", "library_ids": [], "sources": []}
+        player = AutoDJControllerMixin()
+        player.music_library = Library()
+        player.autodj_programs = [block]
+
+        with patch("radiostudio.ui.autodj_controller.active_program", return_value=block):
+            _program, selected_ids, has_requested = player._autodj_selection()
+
+        self.assertEqual(selected_ids, ["music", "talk"])
+        self.assertFalse(has_requested)
+
+    def test_no_active_schedule_block_uses_every_enabled_library_folder(self):
+        class Library:
+            @staticmethod
+            def libraries():
+                return [
+                    {"id": "music", "enabled": True},
+                    {"id": "talk", "enabled": True},
+                    {"id": "disabled", "enabled": False},
+                ]
+
+        player = AutoDJControllerMixin()
+        player.music_library = Library()
+        player.autodj_programs = []
+
+        with patch("radiostudio.ui.autodj_controller.active_program", return_value=None):
+            program, selected_ids, has_requested = player._autodj_selection()
+
+        self.assertIsNone(program)
+        self.assertEqual(selected_ids, ["music", "talk"])
+        self.assertFalse(has_requested)
 
     def test_schedule_change_bypasses_fill_throttle_and_replaces_old_block_queue(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -310,7 +374,7 @@ class AutoDJQueueRegressionTests(unittest.TestCase):
             AutoDJControllerMixin.fill_autodj_queue(player)
 
         self.assertEqual(player.autodj_panel.status,
-                         "Aleatório — todas as bibliotecas: fila completa")
+                         "Aleatório — Biblioteca completa: fila completa")
 
     def test_autodj_worker_discards_stale_queue_result_and_applies_fresh_result(self):
         with tempfile.TemporaryDirectory() as folder:

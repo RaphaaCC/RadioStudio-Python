@@ -10,7 +10,7 @@ from PySide6.QtCore import QObject, QRunnable, QSize, Qt, Signal
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGridLayout,
     QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QMessageBox, QPushButton, QSpinBox, QTabWidget, QTableWidget,
+    QListWidgetItem, QMessageBox, QPushButton, QSpinBox, QDoubleSpinBox, QTabWidget, QTableWidget,
     QTableWidgetItem, QTimeEdit, QVBoxLayout, QWidget,
 )
 from PySide6.QtCore import QTime, QThreadPool, QTimer
@@ -53,7 +53,8 @@ class _ScanWorker(QRunnable):
 
 
 class ProgramDialog(QDialog):
-    def __init__(self, libraries, program=None, parent=None):
+    def __init__(self, libraries, program=None, parent=None, *, collections=(),
+                 groups=(), tags=()):
         super().__init__(parent)
         apply_app_icon(self)
         self.setWindowTitle(translate("Programação AutoDJ"))
@@ -95,8 +96,12 @@ class ProgramDialog(QDialog):
             day_layout.addWidget(check); self.days.append(check)
         root.addWidget(day_box)
 
-        library_box = QGroupBox(translate("Bibliotecas (sem seleção = todas habilitadas)"))
+        library_box = QGroupBox(translate("Pastas indexadas da Biblioteca"))
         library_layout = QVBoxLayout(library_box)
+        library_help = QLabel(translate(
+            "Marque as pastas indexadas que este bloco deve usar. Se não marcar nenhuma pasta nem uma fonte na tabela abaixo, todas as pastas habilitadas serão usadas."))
+        library_help.setWordWrap(True)
+        library_layout.addWidget(library_help)
         self.library_list = QListWidget()
         raw_libraries = program.get("library_ids", [])
         saved_libraries = ({str(value) for value in raw_libraries}
@@ -114,13 +119,82 @@ class ProgramDialog(QDialog):
             self.library_list.addItem(item)
         for library_id in sorted(saved_libraries - available_library_ids):
             item = QListWidgetItem(
-                translate("Biblioteca indisponível ({id})").format(id=library_id))
+                translate("Pasta indisponível ({id})").format(id=library_id))
             item.setData(Qt.UserRole, library_id)
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Checked)
             self.library_list.addItem(item)
         library_layout.addWidget(self.library_list)
         root.addWidget(library_box, 1)
+
+        sources_box = QGroupBox(translate("Fontes do bloco e pesos relativos"))
+        sources_layout = QVBoxLayout(sources_box)
+        sources_help = QLabel(translate(
+            "Marque coleções, grupos, etiquetas ou pastas para usar como fontes deste bloco. Elas podem ser usadas sozinhas ou combinadas com as pastas marcadas acima; os pesos definem a frequência relativa das faixas."))
+        sources_help.setWordWrap(True)
+        sources_layout.addWidget(sources_help)
+        self.source_table = QTableWidget(0, 4)
+        self.source_table.setHorizontalHeaderLabels([
+            translate("Usar"), translate("Tipo"), translate("Origem"), translate("Peso")])
+        self.source_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.source_table.setMaximumHeight(150)
+        self.source_table.horizontalHeader().setStretchLastSection(True)
+        self.source_rows = []
+        raw_sources = program.get("sources", [])
+        saved_sources = {}
+        if isinstance(raw_sources, (list, tuple)):
+            for source in raw_sources:
+                if isinstance(source, dict):
+                    saved_sources[(str(source.get("type", "")), str(source.get("id", "")))] = source
+        source_options = []
+        source_options.extend((
+            "library", str(item["id"]),
+            f"{item['name']} ({translate('Desativado')})" if not item.get("enabled", 1)
+            else item["name"], 1.0)
+            for item in libraries)
+        source_options.extend(("collection", str(item["id"]), item["name"], 1.0)
+                              for item in collections)
+        source_options.extend(("group", str(item["id"]), item["name"],
+                               float(item.get("weight", 1))) for item in groups)
+        source_options.extend(("tag", str(item), str(item), 1.0) for item in tags)
+        source_type_labels = {"library": "Pasta indexada", "collection": "Coleção",
+                              "group": "Grupo de rotação", "tag": "Etiqueta"}
+        available_source_keys = {(kind, source_id)
+                                 for kind, source_id, _name, _weight in source_options}
+        for (kind, source_id), saved in saved_sources.items():
+            if (kind not in source_type_labels
+                    or (kind, source_id) in available_source_keys):
+                continue
+            try:
+                default_weight = float(saved.get("weight", 1))
+            except (TypeError, ValueError, OverflowError):
+                default_weight = 1.0
+            unavailable = translate("Fonte indisponível ({type}: {id})").format(
+                type=translate(source_type_labels[kind]), id=source_id)
+            source_options.append((kind, source_id, unavailable, default_weight))
+        self.source_table.setRowCount(len(source_options))
+        for row, (kind, source_id, name, default_weight) in enumerate(source_options):
+            saved = saved_sources.get((kind, source_id))
+            enabled = QTableWidgetItem()
+            enabled.setFlags(enabled.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+            enabled.setCheckState(Qt.Checked if saved else Qt.Unchecked)
+            enabled.setData(Qt.UserRole, {"type": kind, "id": source_id})
+            self.source_table.setItem(row, 0, enabled)
+            self.source_table.setItem(row, 1, QTableWidgetItem(translate(source_type_labels[kind])))
+            self.source_table.setItem(row, 2, QTableWidgetItem(str(name)))
+            weight = QDoubleSpinBox()
+            weight.setRange(0.01, 100.0)
+            weight.setDecimals(2)
+            weight.setSingleStep(0.25)
+            try:
+                weight_value = float(saved.get("weight", default_weight) if saved else default_weight)
+            except (TypeError, ValueError, OverflowError):
+                weight_value = default_weight
+            weight.setValue(max(0.01, min(100.0, weight_value)))
+            self.source_table.setCellWidget(row, 3, weight)
+            self.source_rows.append((enabled, weight))
+        sources_layout.addWidget(self.source_table)
+        root.addWidget(sources_box)
 
         filters_box = QGroupBox(translate("Filtros de metadados"))
         filters = QFormLayout(filters_box)
@@ -190,6 +264,12 @@ class ProgramDialog(QDialog):
         selected = [self.library_list.item(i).data(Qt.UserRole)
                     for i in range(self.library_list.count())
                     if self.library_list.item(i).checkState() == Qt.Checked]
+        selected_sources = []
+        for enabled, weight in self.source_rows:
+            if enabled.checkState() == Qt.Checked:
+                source = dict(enabled.data(Qt.UserRole))
+                source["weight"] = weight.value()
+                selected_sources.append(source)
         filters = {
             "genres": self.genres.text().strip(), "artists": self.artists.text().strip(),
             "include_keywords": self.include.text().strip(), "exclude_keywords": self.exclude.text().strip(),
@@ -200,7 +280,8 @@ class ProgramDialog(QDialog):
                 "enabled": self.enabled.isChecked(), "name": self.name.text().strip(),
                 "start": self.start.time().toString("HH:mm"), "end": self.end.time().toString("HH:mm"),
                 "days": [index for index, check in enumerate(self.days) if check.isChecked()],
-                "priority": self.priority.value(), "library_ids": selected, "filters": filters}
+                "priority": self.priority.value(), "library_ids": selected,
+                "sources": selected_sources, "filters": filters}
 
 
 class AutoDJPanel(QWidget):
@@ -212,6 +293,7 @@ class AutoDJPanel(QWidget):
         self.scanning_libraries = set()
         self.pool = QThreadPool.globalInstance()
         self.history_tab_index = None
+        self._hidden_library_pages = []
         self._history_refresh_timer = QTimer(self)
         self._history_refresh_timer.setSingleShot(True)
         self._history_refresh_timer.timeout.connect(self.refresh_history_incrementally)
@@ -226,7 +308,7 @@ class AutoDJPanel(QWidget):
         self.toggle.setCheckable(True)
         self.toggle.toggled.connect(self.main_window.set_autodj_enabled)
         header.addWidget(self.toggle)
-        self.status = QLabel(translate("Configure bibliotecas e blocos musicais"))
+        self.status = QLabel(translate("Configure pastas indexadas e blocos de programação"))
         self.status.setWordWrap(True)
         header.addWidget(self.status, 1)
         self.fill_button = QPushButton(
@@ -285,8 +367,14 @@ class AutoDJPanel(QWidget):
             button.setIcon(ui_icon(icon))
             button.clicked.connect(handler); buttons.addWidget(button)
         layout.addLayout(buttons)
+        folders_help = QLabel(translate(
+            "A Biblioteca reúne as faixas das pastas indexadas e ativas. Desativar uma pasta a remove do catálogo e da seleção do AutoDJ; os arquivos permanecem no disco."))
+        folders_help.setWordWrap(True)
+        layout.addWidget(folders_help)
         self.library_table = QTableWidget(0, 4)
-        self.library_table.setHorizontalHeaderLabels([translate("AutoDJ"), translate("Biblioteca"), translate("Faixas"), translate("Pasta")])
+        self.library_table.setHorizontalHeaderLabels([
+            translate("Ativa"), translate("Pasta indexada"),
+            translate("Faixas"), translate("Caminho")])
         self.library_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.library_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.library_table.horizontalHeader().setStretchLastSection(True)
@@ -294,12 +382,14 @@ class AutoDJPanel(QWidget):
         self.library_table.setColumnWidth(2, 55)
         self.library_table.itemChanged.connect(self.library_toggled)
         layout.addWidget(self.library_table)
-        self.tabs.addTab(page, ui_icon("libraries"),
-                         translated_icon_label("📚 Bibliotecas", "📚"))
+        page.setParent(self)
+        page.hide()
+        self._hidden_library_pages.append(page)
 
     def _build_program_tab(self):
         page = QWidget(); layout = QVBoxLayout(page)
-        description = QLabel(translate("Os blocos ativos escolhem a música pelo horário local; fora deles, o AutoDJ mistura todas as bibliotecas habilitadas."))
+        description = QLabel(translate(
+            "Sem um bloco de programação ativo, o AutoDJ usa o catálogo inteiro da Biblioteca: todas as pastas indexadas e habilitadas para o AutoDJ. Em cada bloco, você pode limitar as faixas a pastas indexadas, coleções, grupos ou etiquetas; os filtros refinam essa seleção."))
         description.setWordWrap(True); layout.addWidget(description)
         buttons = QHBoxLayout()
         for label, marker, handler, icon in (
@@ -311,7 +401,7 @@ class AutoDJPanel(QWidget):
             button.clicked.connect(handler); buttons.addWidget(button)
         layout.addLayout(buttons)
         self.program_table = QTableWidget(0, 6)
-        self.program_table.setHorizontalHeaderLabels([translate("Ativo"), translate("Bloco"), translate("Dias"), translate("Horário"), translate("Prioridade"), translate("Filtros / bibliotecas")])
+        self.program_table.setHorizontalHeaderLabels([translate("Ativo"), translate("Bloco"), translate("Dias"), translate("Horário"), translate("Prioridade"), translate("Fontes e filtros")])
         self.program_table.horizontalHeader().setStretchLastSection(True)
         self.program_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.program_table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -336,9 +426,9 @@ class AutoDJPanel(QWidget):
         for column, width in enumerate((145, 165, 130, 130, 100, 60)):
             self.history_table.setColumnWidth(column, width)
         layout.addWidget(self.history_table)
-        self.history_tab_index = self.tabs.addTab(
-            page, ui_icon("history"),
-            translated_icon_label("🕘 Histórico", "🕘"))
+        page.setParent(self)
+        page.hide()
+        self._hidden_library_pages.append(page)
 
     @guarded
     def _tab_changed(self, index):
@@ -347,6 +437,10 @@ class AutoDJPanel(QWidget):
 
     @guarded
     def schedule_history_refresh(self):
+        library_panel = getattr(self.main_window, "library_panel", None)
+        if library_panel is not None:
+            library_panel.schedule_history_refresh()
+            return
         # Keep QTableWidget work out of the reentrant media-state callback.
         if self.tabs.currentIndex() == self.history_tab_index and self.isVisible():
             self._history_refresh_timer.start(0)
@@ -408,6 +502,11 @@ class AutoDJPanel(QWidget):
 
     @guarded
     def refresh_libraries(self):
+        library_panel = getattr(self.main_window, "library_panel", None)
+        if library_panel is not None:
+            library_panel.refresh_libraries()
+            self.refresh_programs()
+            return
         libraries = self.library.libraries()
         self.library_table.blockSignals(True)
         self.library_table.setRowCount(len(libraries))
@@ -436,11 +535,12 @@ class AutoDJPanel(QWidget):
 
     @guarded
     def add_library(self):
-        folder = QFileDialog.getExistingDirectory(self, translate("Adicionar biblioteca musical"))
+        folder = QFileDialog.getExistingDirectory(self, translate("Adicionar pasta à Biblioteca"))
         if not folder:
             return
-        default_name = Path(folder).name or translate("Biblioteca")
-        name, accepted = QInputDialog.getText(self, translate("Nome da biblioteca"), translate("Nome:"), text=default_name)
+        default_name = Path(folder).name or translate("Pasta")
+        name, accepted = QInputDialog.getText(
+            self, translate("Nome da pasta na Biblioteca"), translate("Nome:"), text=default_name)
         if not accepted:
             return
         try:
@@ -469,7 +569,7 @@ class AutoDJPanel(QWidget):
         self.workers.add(worker)
         self.scanning_libraries.add(library_id)
         worker.signals.finished.connect(self._scan_finished)
-        self.set_status("Indexando biblioteca em segundo plano…")
+        self.set_status("Indexando pasta da Biblioteca em segundo plano…")
         # Library scans can parse many tags; keep them below interactive work
         # so the queue and playback controls stay responsive on busy PCs.
         self.pool.start(worker, priority=-1)
@@ -481,12 +581,18 @@ class AutoDJPanel(QWidget):
             if worker.library_id == library_id:
                 self.workers.discard(worker)
         if isinstance(result, Exception):
-            self.main_window.log_event("error", f"Falha ao indexar biblioteca: {result}")
-            self.set_status(f"Falha no exame: {result}")
+            self.main_window.log_event(
+                "error", translate("Falha ao indexar pasta da Biblioteca: {result}").format(
+                    result=result))
+            self.set_status(translate("Falha ao examinar pasta: {result}").format(result=result))
         else:
             added, unchanged, errors = result
-            self.set_status(f"Exame concluído: {added} atualizado(s), {unchanged} sem alterações, {errors} erro(s).")
-            self.main_window.log_event("info", f"Biblioteca examinada: {added} faixa(s) atualizada(s), {errors} erro(s).")
+            self.set_status(translate(
+                "Exame concluído: {added} faixa(s) atualizada(s), {unchanged} sem alterações, {errors} erro(s)."
+            ).format(added=added, unchanged=unchanged, errors=errors))
+            self.main_window.log_event("info", translate(
+                "Pasta examinada na Biblioteca: {added} faixa(s) atualizada(s), {errors} erro(s)."
+            ).format(added=added, errors=errors))
         self.refresh_libraries(); self.main_window.save_state()
         self.main_window.autodj_last_signature = None
         self.main_window.fill_autodj_queue(bypass_throttle=True)
@@ -496,7 +602,9 @@ class AutoDJPanel(QWidget):
         ids = self.selected_library_ids()
         if not ids:
             return
-        answer = ask_question(self, translate("Remover bibliotecas"), translate("Remover biblioteca(s) e seus índices? O histórico de reprodução será preservado."))
+        answer = ask_question(
+            self, translate("Remover pastas da Biblioteca"),
+            translate("Remover pasta(s) da Biblioteca e seus índices? O histórico de reprodução será preservado."))
         if answer != QMessageBox.Yes:
             return
         for library_id in ids:
@@ -513,6 +621,8 @@ class AutoDJPanel(QWidget):
     def refresh_programs(self):
         programs = self.main_window.autodj_programs
         libraries = {str(lib["id"]): lib for lib in self.library.libraries()}
+        collections = {str(item["id"]): item for item in self.library.collections()}
+        groups = {str(item["id"]): item for item in self.library.rotation_groups()}
         self.program_table.setRowCount(len(programs))
         for row, program in enumerate(programs):
             if not isinstance(program, dict):
@@ -548,27 +658,89 @@ class AutoDJPanel(QWidget):
             library_ids = program.get("library_ids", [])
             if not isinstance(library_ids, (list, tuple, set)):
                 library_ids = []
-            requested_ids = [str(value) for value in library_ids if value is not None]
-            selected = [
-                libraries[library_id]["name"] + (
-                    f" ({translate('Desativado')})"
-                    if not libraries[library_id].get("enabled", 1) else "")
-                for library_id in requested_ids if library_id in libraries
-            ]
-            missing = [library_id for library_id in requested_ids if library_id not in libraries]
-            selected.extend(
-                translate("Biblioteca indisponível ({id})").format(id=library_id)
-                for library_id in missing)
-            library_value = (", ".join(selected) if requested_ids
-                             else translate("todas habilitadas"))
-            bits.append(f"{translate('Bibliotecas')}: {library_value}")
+            requested_ids = list(dict.fromkeys(
+                str(value) for value in library_ids if value is not None))
+            folder_names = []
+            for library_id in requested_ids:
+                library = libraries.get(library_id)
+                if library:
+                    name = str(library.get("name") or library_id)
+                    if not library.get("enabled", 1):
+                        name += f" ({translate('Desativado')})"
+                else:
+                    name = translate("Pasta indisponível ({id})").format(id=library_id)
+                folder_names.append(name)
+
+            sources = program.get("sources", [])
+            if not isinstance(sources, (list, tuple)):
+                sources = []
+            source_labels = {
+                "library": "Pasta indexada", "collection": "Coleção",
+                "group": "Grupo de rotação", "tag": "Etiqueta",
+            }
+            available_tags = set(self.library.unique_tags())
+            source_names = []
+            for source in sources:
+                if not isinstance(source, dict):
+                    continue
+                kind = str(source.get("type", ""))
+                source_id = str(source.get("id", ""))
+                if kind not in source_labels or not source_id:
+                    continue
+                unavailable = False
+                if kind == "library":
+                    item = libraries.get(source_id)
+                    if item:
+                        name = str(item.get("name") or source_id)
+                        if not item.get("enabled", 1):
+                            name += f" ({translate('Desativado')})"
+                    else:
+                        unavailable = True
+                elif kind == "collection":
+                    item = collections.get(source_id)
+                    if item:
+                        name = str(item.get("name") or source_id)
+                    else:
+                        unavailable = True
+                elif kind == "group":
+                    item = groups.get(source_id)
+                    if item:
+                        name = str(item.get("name") or source_id)
+                    else:
+                        unavailable = True
+                elif kind == "tag":
+                    name = source_id
+                    unavailable = source_id not in available_tags
+                else:
+                    continue
+                try:
+                    weight = max(0.01, min(100.0, float(source.get("weight", 1))))
+                    weight_text = f"{weight:g}"
+                except (TypeError, ValueError, OverflowError):
+                    weight_text = "1"
+                source_label = (
+                    translate("Fonte indisponível ({type}: {id})").format(
+                        type=translate(source_labels[kind]), id=source_id)
+                    if unavailable else f"{translate(source_labels[kind])}: {name}")
+                source_names.append(f"{source_label} ({translate('Peso')} {weight_text})")
+
+            if folder_names:
+                bits.append(f"{translate('Pastas')}: {', '.join(folder_names)}")
+            if source_names:
+                bits.append(f"{translate('Fontes')}: {', '.join(source_names)}")
+            if not requested_ids and not source_names:
+                bits.append(
+                    f"{translate('Pastas')}: {translate('Todas as pastas habilitadas para o AutoDJ')}")
             self.program_table.setItem(row, 4, QTableWidgetItem(str(program.get("priority", 0))))
             self.program_table.setItem(row, 5, QTableWidgetItem(" • ".join(bits)))
         self.program_table.resizeColumnsToContents()
 
     @guarded
     def add_program(self):
-        dialog = ProgramDialog(self.library.libraries(), parent=self)
+        dialog = ProgramDialog(
+            self.library.libraries(), parent=self,
+            collections=self.library.collections(), groups=self.library.rotation_groups(),
+            tags=self.library.unique_tags())
         if dialog.exec() == QDialog.Accepted:
             self.main_window.autodj_programs.append(dialog.value())
             self.refresh_programs(); self.main_window.save_state()
@@ -584,7 +756,10 @@ class AutoDJPanel(QWidget):
         if row < 0:
             return
         current = self.main_window.autodj_programs[row]
-        dialog = ProgramDialog(self.library.libraries(), current, self)
+        dialog = ProgramDialog(
+            self.library.libraries(), current, self,
+            collections=self.library.collections(), groups=self.library.rotation_groups(),
+            tags=self.library.unique_tags())
         if dialog.exec() == QDialog.Accepted:
             self.main_window.autodj_programs[row] = dialog.value(current)
             self.refresh_programs(); self.main_window.save_state()
@@ -602,6 +777,10 @@ class AutoDJPanel(QWidget):
 
     @guarded
     def refresh_history(self, incremental=False):
+        library_panel = getattr(getattr(self, "main_window", None), "library_panel", None)
+        if library_panel is not None:
+            library_panel.refresh_history()
+            return
         # Track starts are recorded from playback callbacks. Rebuilding up to
         # 1,000 rows (7,000 table items) while the history tab is hidden can
         # stall the UI at every song change, so refresh lazily on demand. A

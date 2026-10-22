@@ -77,7 +77,15 @@ def program_signature(program):
     filters = program.get("filters", {})
     if not isinstance(filters, dict):
         filters = {}
+    sources = program.get("sources", [])
+    if not isinstance(sources, (list, tuple)):
+        sources = []
+    normalized_sources = tuple(sorted(
+        (str(item.get("type", "")), str(item.get("id", "")),
+         str(item.get("weight", 1)))
+        for item in sources if isinstance(item, dict)))
     return (str(program.get("id", "")), tuple(sorted(map(str, libraries))),
+            normalized_sources,
             tuple(sorted((str(key), repr(value)) for key, value in filters.items())))
 
 
@@ -189,7 +197,7 @@ def choose_track(tracks, history, *, artist_cooldown_minutes=0,
         # queue are still avoided; the caller can try again after playback advances.
         return None, "Sem faixas inéditas na fila; aguardando a reprodução avançar."
     if not candidates:
-        return None, "Nenhuma faixa disponível para os filtros e bibliotecas selecionados."
+        return None, "Nenhuma faixa disponível para as fontes e os filtros selecionados."
 
     last_paths, last_artists = history
     def cooldown(value):
@@ -237,7 +245,14 @@ def choose_track(tracks, history, *, artist_cooldown_minutes=0,
     else:
         pool = eligible
     while pool:
-        selected = random.choice(pool)
+        weights = []
+        for candidate in pool:
+            try:
+                weights.append(max(0.0001, min(100.0,
+                                                float(candidate[0].get("rotation_weight", 1)))))
+            except (TypeError, ValueError, OverflowError):
+                weights.append(1.0)
+        selected = random.choices(pool, weights=weights, k=1)[0]
         chosen = selected[0]
         if Path(str(chosen.get("path", ""))).is_file():
             return chosen, reason

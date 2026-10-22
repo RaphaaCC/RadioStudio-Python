@@ -88,7 +88,7 @@ class SettingsControllerMixin:
 
     @guarded
     def show_settings(self):
-        current_track = (read_track_metadata(self.tracks[self.current_index])
+        current_track = (self.music_library.metadata_for_track(self.tracks[self.current_index])
                          if 0 <= self.current_index < len(self.tracks) else None)
         api_username = ""
         api_password_configured = False
@@ -154,7 +154,8 @@ class SettingsControllerMixin:
                                 control_api_config=self.control_api_config,
                                 control_api_username=api_username,
                                 control_api_password_configured=api_password_configured,
-                                control_api_token=api_token)
+                                control_api_token=api_token,
+                                metadata_edit_default_target=self.metadata_edit_default_target)
         self._active_settings_dialog = dialog
         if dialog.exec() != QDialog.Accepted:
             self._active_settings_dialog = None
@@ -190,7 +191,8 @@ class SettingsControllerMixin:
          self.discord_button2_url, self.process_priority,
          self.backup_directory, self.backup_periodic_enabled,
          self.backup_interval_seconds, self.backup_retention,
-         self.language_preference) = dialog.values()
+         self.language_preference,
+         self.metadata_edit_default_target) = dialog.values()
         self.control_api_config = new_control_api_config
         api_credentials_saved = True
         try:
@@ -246,7 +248,7 @@ class SettingsControllerMixin:
         # The modal settings window can stay open long enough for playback to
         # advance. Re-read the current row here instead of publishing metadata
         # captured when the dialog was opened.
-        current_on_air = (read_track_metadata(self.tracks[self.current_index])
+        current_on_air = (self.music_library.metadata_for_track(self.tracks[self.current_index])
                           if 0 <= self.current_index < len(self.tracks) else None)
         if current_on_air and self.player.playbackState() != QMediaPlayer.StoppedState:
             self.broadcast.set_title(format_broadcast_title(
@@ -356,7 +358,7 @@ class SettingsControllerMixin:
                 self, translate("Backup em andamento"),
                 translate("Aguarde a criação do backup atual terminar antes de importar outro."))
             return
-        if (getattr(self.autodj_panel, "scanning_libraries", set())
+        if (getattr(getattr(self, "library_panel", None), "_scanning", set())
                 or getattr(self, "_autodj_fill_worker", None) is not None):
             show_warning(
                 self, translate("Biblioteca em uso"),
@@ -400,7 +402,7 @@ class SettingsControllerMixin:
                 self, translate("Backup em andamento"),
                 translate("Aguarde a criação do backup terminar antes de reparar o banco de dados."))
             return
-        if (getattr(self.autodj_panel, "scanning_libraries", set())
+        if (getattr(getattr(self, "library_panel", None), "_scanning", set())
                 or getattr(self, "_autodj_fill_worker", None) is not None):
             show_warning(
                 self, translate("Biblioteca em uso"),

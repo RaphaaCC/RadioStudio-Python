@@ -355,6 +355,9 @@ class PersistenceMixin:
                 {"current", "track_change", "interval"} else "current")
             self.metadata_update_interval_seconds = bounded_int(
                 state.get("metadata_update_interval_seconds", 30), 30, 5, 3600)
+            saved_edit_target = state.get("metadata_edit_default_target", "internal")
+            self.metadata_edit_default_target = (
+                saved_edit_target if saved_edit_target in {"internal", "file"} else "internal")
             self.broadcast.set_metadata_update_preferences(
                 self.metadata_update_mode, self.metadata_update_interval_seconds)
             explorer_folder = state.get("explorer_folder", "")
@@ -375,6 +378,9 @@ class PersistenceMixin:
             self.autodj_panel.load_settings(self.autodj_config)
             self.autodj_panel.refresh_programs()
             self.autodj_panel.refresh_libraries()
+            self.library_panel.refresh_libraries()
+            self.library_panel.refresh_organization()
+            self.library_panel.refresh_catalog()
             # Older state files did not store the selector signature. Seed it
             # from the current block so the first startup fill extends the
             # saved queue instead of discarding its already-selected tracks.
@@ -386,6 +392,7 @@ class PersistenceMixin:
                     logging.getLogger("radiostudio").exception(
                         "Não foi possível restaurar a assinatura da fila do AutoDJ")
             self.autodj_panel.refresh_history()
+            self.library_panel.refresh_history()
         except (OSError, ValueError, TypeError, KeyError) as exc:
             logging.getLogger("radiostudio").error(
                 "Não foi possível carregar dados salvos de %s: %s", STATE_FILE, exc)
@@ -494,6 +501,8 @@ class PersistenceMixin:
                 "station_metadata": self.station_metadata,
                 "metadata_update_mode": self.metadata_update_mode,
                 "metadata_update_interval_seconds": self.metadata_update_interval_seconds,
+                "metadata_edit_default_target": getattr(
+                    self, "metadata_edit_default_target", "internal"),
                 "explorer_folder": self.explorer_folder,
                 "broadcast_profiles": self.broadcast_panel.profiles,
                 "local_broadcast": self.broadcast_panel.local_config()}
