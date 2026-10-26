@@ -232,6 +232,10 @@ class RecordingSession:
             if process is not None:
                 if process.stdin:
                     process.stdin.close()
+                    # communicate() flushes stdin on POSIX. Detach the already
+                    # closed pipe after sending EOF so finalization works on
+                    # Linux as well as Windows.
+                    process.stdin = None
                 try:
                     _stdout, stderr = process.communicate(timeout=8)
                 except subprocess.TimeoutExpired:

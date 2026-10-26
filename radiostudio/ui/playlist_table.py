@@ -9,7 +9,7 @@ from ..config import AUDIO_EXTENSIONS
 
 
 class PlaylistTable(QTableWidget):
-    """Accept audio files dragged from the built-in explorer or Windows Explorer."""
+    """Accept audio files dragged from the built-in explorer or system file manager."""
 
     def __init__(self, add_paths, commit_order, move_selected, remove_selected,
                  restore_order=None, parent=None):

@@ -39,7 +39,7 @@ def resolve_output_device(saved_key: str) -> QAudioDevice:
         for device in QMediaDevices.audioOutputs():
             if device_key(device) == saved_key:
                 return device
-    return QAudioDevice()  # Follow the current Windows default output.
+    return QAudioDevice()  # Follow the current system default output.
 
 
 class SettingsDialog(QDialog):
@@ -93,7 +93,7 @@ class SettingsDialog(QDialog):
 
         startup_group = QGroupBox(translate("Inicialização"))
         startup_layout = QVBoxLayout(startup_group)
-        self.minimize_to_tray = QCheckBox(translate("Ao fechar a janela, continuar na bandeja do Windows"))
+        self.minimize_to_tray = QCheckBox(translate("Ao fechar a janela, continuar na bandeja do sistema"))
         self.minimize_to_tray.setChecked(minimize_to_tray)
         self.minimize_to_tray.setEnabled(tray_available)
         startup_layout.addWidget(self.minimize_to_tray)
@@ -122,11 +122,11 @@ class SettingsDialog(QDialog):
             selected_priority = self.process_priority.findData("normal")
         self.process_priority.setCurrentIndex(selected_priority)
         self.process_priority.setToolTip(
-            translate("Altera a prioridade de agendamento de CPU do processo no Windows."))
+            translate("Altera a prioridade de agendamento de CPU do processo no sistema."))
         performance_form.addRow(translate("Prioridade do processo"), self.process_priority)
         performance_layout.addLayout(performance_form)
         self.process_priority_warning = QLabel(
-            translate("⚠️ Tempo real pode deixar o Windows ou outros programas sem resposta. "
+            translate("⚠️ Tempo real pode deixar o sistema ou outros programas sem resposta. "
             "Use somente se necessário."))
         self.process_priority_warning.setWordWrap(True)
         self.process_priority_warning.setVisible(
@@ -261,7 +261,7 @@ class SettingsDialog(QDialog):
         self.control_api_http_warning.setWordWrap(True)
         api_layout.addWidget(self.control_api_http_warning)
         api_firewall_note = QLabel(translate(
-            "O RadioStudio não altera o Firewall do Windows. Se outros dispositivos não conseguirem conectar, confira as regras de entrada da rede."))
+            "O RadioStudio não altera o firewall do sistema. Se outros dispositivos não conseguirem conectar, confira as regras de entrada da rede."))
         api_firewall_note.setWordWrap(True)
         api_layout.addWidget(api_firewall_note)
         api_addresses_label = QLabel(translate("Endereços para conexão"))
@@ -326,7 +326,7 @@ class SettingsDialog(QDialog):
         backup_note = QLabel(
             translate("O backup inclui configurações, playlist, programação, índice e histórico das bibliotecas; "
             "os arquivos de música não são copiados. "
-            "As senhas do Gerenciador de Credenciais do Windows não são exportadas. "
+            "As senhas do gerenciador de credenciais do sistema não são exportadas. "
             "Backups periódicos são executados enquanto o RadioStudio está aberto."))
         backup_note.setWordWrap(True)
         backup_layout.addWidget(backup_note)
@@ -572,7 +572,7 @@ class SettingsDialog(QDialog):
         self.preview_device = QComboBox()
         devices = QMediaDevices.audioOutputs()
         for combo, key in ((self.main_device, main_key), (self.preview_device, preview_key)):
-            combo.addItem(translate("Padrão do Windows"), "")
+            combo.addItem(translate("Padrão do sistema"), "")
             for device in devices:
                 combo.addItem(device.description(), device_key(device))
             selected = combo.findData(key)
@@ -607,7 +607,7 @@ class SettingsDialog(QDialog):
         saved_inputs = input_device_keys if isinstance(input_device_keys, dict) else {}
         for channel in INPUT_CHANNELS:
             combo = QComboBox()
-            combo.addItem(translate("Dispositivo padrão do Windows"), "")
+            combo.addItem(translate("Dispositivo padrão do sistema"), "")
             for device in input_devices:
                 combo.addItem(device.description(), audio_device_key(device))
             saved_key = str(saved_inputs.get(channel, "") or "")

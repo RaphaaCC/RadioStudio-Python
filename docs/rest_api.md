@@ -4,7 +4,7 @@ The versioned HTTP API lets trusted clients on the local network read playback s
 
 ## Enable and connect
 
-Open **Settings → API**, enable the REST API, choose a port and an authentication mode, then save. The default port is `8091`; the audio server commonly uses `8090`. The API is disabled by default. When enabled, it listens on the computer's network interfaces so other LAN devices can connect. RadioStudio does not add Windows Firewall rules.
+Open **Settings → API**, enable the REST API, choose a port and an authentication mode, then save. The default port is `8091`; the audio server commonly uses `8090`. The API is disabled by default. When enabled, it listens on the computer's network interfaces so other LAN devices can connect. RadioStudio does not add system firewall rules.
 
 All requests use the `/api/v1` prefix. The settings page lists connection URLs for the machine's detected IPv4 addresses. For example:
 
@@ -17,7 +17,7 @@ Authentication is required for every endpoint. Choose one mode in Settings:
 - **Generated token:** send `Authorization: Bearer <token>`.
 - **Username and password:** send HTTP Basic authentication.
 
-RadioStudio stores these credentials in Windows Credential Manager. It does not put them in the settings file or exported configuration backups.
+RadioStudio stores these credentials through `keyring`: Windows Credential Manager on Windows, or the graphical desktop session’s Secret Service (such as GNOME Keyring) on Ubuntu/Debian. The Linux credential service must be running and unlocked. It does not put them in the settings file or exported configuration backups.
 
 > **HTTP is unencrypted.** Usernames, passwords, tokens, playback commands, and responses can be observed by someone with access to the network. Use the API only on a network you trust. The API does not provide TLS.
 

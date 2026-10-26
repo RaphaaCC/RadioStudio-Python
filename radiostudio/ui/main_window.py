@@ -949,7 +949,7 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(USER_MANUAL_FILE))):
             show_warning(
                 self, translate("Não foi possível abrir o manual"),
-                translate("O Windows não encontrou um aplicativo padrão para arquivos PDF."),
+                translate("O sistema não encontrou um aplicativo padrão para arquivos PDF."),
             )
 
     @guarded

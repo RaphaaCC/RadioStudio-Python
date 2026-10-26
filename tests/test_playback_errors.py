@@ -538,10 +538,10 @@ class PlaybackErrorTests(unittest.TestCase):
 
         self.assertEqual(player.next_calls, 0)
 
-    def test_end_transition_promotes_mix_when_qt_normalizes_windows_path(self):
+    def test_end_transition_promotes_mix_with_native_qt_path(self):
         player = _PromotionHarness()
-        old_path = r"C:\Music\old-track.mp3"
-        next_path = r"C:\Music\next-track.mp3"
+        old_path = str(Path(tempfile.gettempdir()) / "Música" / "old-track.mp3")
+        next_path = str(Path(tempfile.gettempdir()) / "Música" / "next-track.mp3")
         player.tracks = [old_path, next_path]
         player.player = _DisplayPlayer(old_path, 180000, 180000,
                                        QMediaPlayer.StoppedState,
@@ -563,9 +563,9 @@ class PlaybackErrorTests(unittest.TestCase):
 
     def test_consecutive_mix_promotions_advance_queue_after_each_end(self):
         player = _PromotionHarness()
-        first = r"C:\Music\first.mp3"
-        second = r"C:\Music\second.mp3"
-        third = r"C:\Music\third.mp3"
+        first = str(Path(tempfile.gettempdir()) / "Música" / "first.mp3")
+        second = str(Path(tempfile.gettempdir()) / "Música" / "second.mp3")
+        third = str(Path(tempfile.gettempdir()) / "Música" / "third.mp3")
         player.tracks = [first, second, third]
         player.player = _DisplayPlayer(first, 180000, 180000,
                                        QMediaPlayer.StoppedState,
@@ -678,9 +678,9 @@ class PlaybackErrorTests(unittest.TestCase):
         self.assertEqual(player.position_label.text, "02:05 / 03:00")
         self.assertEqual(player.position.value, 125000)
 
-    def test_windows_path_normalization_does_not_restart_waveform_analysis(self):
+    def test_native_path_normalization_does_not_restart_waveform_analysis(self):
         player = _DisplayHarness()
-        path = r"C:\Music\next-track.mp3"
+        path = str(Path(tempfile.gettempdir()) / "Música" / "next-track.mp3")
         player.player = _DisplayPlayer(path, 180000, 125000)
         player.tracks = [path]
         player.on_air._track_path = path

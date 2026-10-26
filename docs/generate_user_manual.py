@@ -284,14 +284,18 @@ SECTIONS = [
     ]),
     ("2. Abrir e preparar o programa", [
         ("h2", "Projeto em desenvolvimento"),
-        ("p", "No projeto de desenvolvimento, abra Iniciar RadioStudio Python.bat. A primeira execução pode preparar o ambiente e instalar as dependências. Durante o uso, a janela principal contém a fila, o explorador e os painéis de operação."),
+        ("p", "No Windows, abra Iniciar RadioStudio Python.bat no projeto de desenvolvimento. No Ubuntu ou Debian com interface gráfica, abra um terminal na pasta do projeto e execute bash \"Iniciar RadioStudio Python.sh\". A primeira execução pode preparar o ambiente e instalar as dependências. Durante o uso, a janela principal contém a fila, o explorador e os painéis de operação."),
+        ("h2", "Ubuntu e Debian com interface gráfica"),
+        ("p", "O código Python pode ser executado no Windows e em desktops Ubuntu 22.04/24.04 ou Debian 12/13. No Linux, use uma sessão X11 ou Wayland com PulseAudio ou PipeWire funcionando e instale as bibliotecas Qt e o provedor de credenciais indicados no README do repositório. Não execute como root. O aplicativo não oferece operação em servidor sem interface gráfica."),
+        ("p", "A bandeja depende do ambiente gráfico. Quando ela não está disponível, fechar a janela encerra o programa. Prioridades elevadas de CPU e tempo real dependem das permissões do sistema; uma recusa não impede as outras funções do aplicativo."),
+        ("callout", ("Ao mover dados entre computadores ou sistemas, selecione novamente as pastas de músicas correspondentes. Letras de unidade do Windows não correspondem aos pontos de montagem do Linux. No Linux, nomes de arquivo diferenciam maiúsculas e minúsculas. Backups não copiam músicas nem senhas.", False)),
         ("h2", "Pacote instalado e versão portátil"),
-        ("p", "Na versão instalada, use o atalho criado pelo instalador. Na versão portátil, execute o arquivo Portable. O modo portátil tenta guardar dados na pasta RadioStudioPythonData ao lado do executável; se não puder gravar ali, usa o perfil normal do Windows."),
+        ("p", "Na versão instalada, use o atalho criado pelo instalador. Na versão portátil, execute o arquivo Portable. O modo portátil tenta guardar dados na pasta RadioStudioPythonData ao lado do executável; se não puder gravar ali, usa o perfil normal do usuário no sistema."),
         ("callout", ("O instalador e o pacote portátil são distribuídos separadamente do projeto Python. Configurações e histórico pertencem ao perfil de dados, não ao arquivo do programa.", False)),
         ("h2", "Primeira configuração"),
         ("steps", [
             "Abra Configurações no topo direito ou Arquivo > Configurações.",
-            "Na aba Áudio, selecione Reprodução principal e Escuta / pré-escuta. Deixe Padrão do Windows se não precisar escolher um dispositivo específico.",
+            "Na aba Áudio, selecione Reprodução principal e Escuta / pré-escuta. Deixe Padrão do sistema se não precisar escolher um dispositivo específico.",
             "Na aba Metadados, informe os dados da estação que deseja publicar.",
             "Adicione uma ou mais faixas e confira se o título aparece na fila.",
             "Pressione Reproduzir para testar uma faixa antes de configurar uma transmissão.",
@@ -392,7 +396,7 @@ SECTIONS = [
     ("8. Configurações gerais, áudio e metadados", [
         ("h2", "Geral"),
         ("bullets", [
-            "Ao fechar a janela, continuar na bandeja do Windows: mantém o programa aberto em segundo plano. Use Sair no menu Arquivo ou na bandeja para encerrar.",
+            "Ao fechar a janela, continuar na bandeja do sistema: mantém o programa aberto em segundo plano. Use Sair no menu Arquivo ou na bandeja para encerrar.",
             "Ao abrir, retomar a música que estava tocando ao sair: restaura a posição salva da faixa na próxima inicialização.",
             "Iniciar transmissão ao abrir se estava ativa ao sair: restaura essa intenção de inicialização.",
             "Controles do player: posiciona os controles abaixo da playlist ou no topo, abaixo de No ar.",
@@ -418,7 +422,7 @@ SECTIONS = [
         ("h2", "Configurar os dispositivos"),
         ("steps", [
             "Abra Configurações > Entradas.",
-            "Escolha o dispositivo do Microfone e, se necessário, de cada auxiliar. Dispositivo padrão do Windows usa a seleção atual do sistema.",
+            "Escolha o dispositivo do Microfone e, se necessário, de cada auxiliar. Dispositivo padrão do sistema usa a seleção atual do sistema.",
             "No painel Entradas, ligue o botão do canal que deseja usar e confira o estado mostrado abaixo dele.",
             "Se um dispositivo aparecer como ocupado ou incompatível, escolha outra entrada ou feche o aplicativo que está usando o dispositivo.",
         ]),
@@ -577,7 +581,7 @@ SECTIONS = [
             "Pressione Iniciar transmissão na parte inferior.",
             "Use o endereço exibido e acrescente /live.mp3 em um player compatível para ouvir o stream.",
         ]),
-        ("p", "Com Permitir acesso pela rede local desligado, o endereço usa 127.0.0.1 e serve para este computador. Ligado, o endereço mostra o IP desta máquina para outros dispositivos da rede. O firewall do Windows pode pedir autorização ou bloquear conexões."),
+        ("p", "Com Permitir acesso pela rede local desligado, o endereço usa 127.0.0.1 e serve para este computador. Ligado, o endereço mostra o IP desta máquina para outros dispositivos da rede. O firewall do sistema pode pedir autorização ou bloquear conexões."),
         ("p", "O endpoint /status.json apresenta estado local, faixa e ouvintes. Se a porta escolhida estiver ocupada, o RadioStudio tenta portas seguintes e atualiza o endereço mostrado."),
         ("callout", ("O servidor embutido é uma saída local do programa. Para que ouvintes fora da rede local acessem sua rádio, também são necessários roteador, firewall, endereço público e regras de rede adequadas.", True)),
     ]),
@@ -598,7 +602,7 @@ SECTIONS = [
             "Porta HTTP/admin é opcional e só precisa ser diferente quando o painel administrativo usa outra porta.",
             "Bitrate define a taxa MP3, de 32 a 320 kbps. Qualidade do encoder ajusta custo de CPU versus qualidade.",
         ]),
-        ("p", "As senhas de origem e administrativa são guardadas no Gerenciador de Credenciais do Windows. Elas não ficam no arquivo state.json e precisam ser cadastradas novamente ao mudar para outro computador."),
+        ("p", "As senhas de origem e administrativa usam o Gerenciador de Credenciais do Windows ou o Secret Service da sessão gráfica no Linux, como o GNOME Keyring. No Linux, esse serviço precisa estar em execução e desbloqueado. Elas não ficam no arquivo state.json e precisam ser cadastradas novamente ao mudar para outro computador."),
         ("callout", ("A conexão depende das credenciais, do protocolo e da configuração do seu servidor. Confirme o resultado com um servidor real; o manual não garante compatibilidade com todos os provedores.", True)),
     ]),
     ("19. Estado da transmissão e metadados", [
@@ -650,7 +654,7 @@ SECTIONS = [
             "music_library.sqlite3 contém o índice das pastas da Biblioteca, a organização do acervo e o histórico do AutoDJ.",
             "Arquivos temporários de decodificação podem ser removidos quando o player libera a faixa.",
         ]),
-        ("p", "No modo instalado, os dados ficam em %APPDATA%\\RadioStudioPython, normalmente dentro da pasta AppData\\Roaming do usuário do Windows. No portátil, procure primeiro RadioStudioPythonData ao lado do executável; uma pasta sem permissão de escrita usa o perfil do Windows."),
+        ("p", "No Windows, os dados ficam em %APPDATA%\\RadioStudioPython. No Linux, ficam em $XDG_DATA_HOME/RadioStudioPython ou, por padrão, ~/.local/share/RadioStudioPython. Um perfil legado em ~/RadioStudioPython continua sendo usado se não houver um perfil XDG ou uma localização XDG explícita. RADIOSTUDIO_DATA_DIR permite selecionar outra pasta em ambos os sistemas. No portátil, procure primeiro RadioStudioPythonData ao lado do executável; uma pasta sem permissão de escrita usa o perfil normal do sistema."),
         ("h2", "Fazer uma cópia de segurança"),
         ("steps", [
             "Encerre o programa pelo comando Sair para permitir que arquivos e banco sejam fechados.",
@@ -658,7 +662,7 @@ SECTIONS = [
             "Para restaurar, feche o RadioStudio e substitua os arquivos da pasta de perfil pela cópia.",
             "Depois de restaurar, abra o programa e confira a fila, as pastas indexadas, o catálogo e o histórico.",
         ]),
-        ("callout", ("Uma cópia de segurança não transfere as senhas do Gerenciador de Credenciais do Windows. Ao mudar de computador, informe-as novamente nos perfis de transmissão.", True)),
+        ("callout", ("Uma cópia de segurança não transfere as senhas do gerenciador de credenciais do sistema. Ao mudar de computador, informe-as novamente nos perfis de transmissão.", True)),
     ]),
     ("22. Atalhos de teclado", [
         ("bullets", [
@@ -750,7 +754,7 @@ SECTIONS = [
     ]),
     ("25. Limites desta versão", [
         ("p", "A gravação desta versão é um único mix estéreo do Master Ao Vivo; não há gravação multifaixa nem edição de áudio dentro do RadioStudio. A interface está disponível em português, inglês, espanhol, coreano, japonês, chinês tradicional e chinês simplificado."),
-        ("p", "O protocolo de fonte SHOUTcast implementado é o legado v1, com suporte à identificação de Stream ID compatível com DNAS 2.4.7 ou mais recente; o protocolo nativo v2 não está implementado. A disponibilidade simultânea de entradas também depende dos drivers e dispositivos do Windows."),
+        ("p", "O protocolo de fonte SHOUTcast implementado é o legado v1, com suporte à identificação de Stream ID compatível com DNAS 2.4.7 ou mais recente; o protocolo nativo v2 não está implementado. A disponibilidade simultânea de entradas também depende dos drivers e dispositivos do sistema."),
         ("p", "As listas de formatos indicam extensões aceitas pelo seletor, mas o suporte real depende do codec disponível. A Rich Presence depende do Discord instalado, em execução e acessível pelo canal IPC local."),
         ("p", "Relate bugs usando o contato mostrado em Ajuda > Sobre. Inclua versão, horário, ação realizada e mensagens do Histórico. Não envie senhas, tokens ou cópias do seu banco de dados público."),
         ("callout", (f"Este guia acompanha a versão {VERSION}. Os nomes de opções e recursos podem mudar em versões futuras.", False)),
@@ -797,7 +801,7 @@ def build_manual() -> None:
         "chamam atenção para cuidados ou limitações."
     ))
     story.append(paragraph(
-        "A interface pode variar um pouco com o tamanho da janela e a configuração do Windows. "
+        "A interface pode variar um pouco com o tamanho da janela e a configuração do sistema e do ambiente gráfico. "
         "Se uma opção não estiver visível, procure pelo nome indicado nas abas ou menus."
     ))
     story.append(PageBreak())

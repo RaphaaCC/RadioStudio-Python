@@ -211,7 +211,7 @@ class SettingsControllerMixin:
                 "Não foi possível salvar as credenciais da API REST no Gerenciador de Credenciais")
             show_warning(
                 self, translate("API REST"),
-                translate("Não foi possível salvar as credenciais da API REST no Gerenciador de Credenciais do Windows."))
+                translate("Não foi possível salvar as credenciais da API REST no gerenciador de credenciais do sistema."))
         try:
             save_language_preference(LANGUAGE_FILE, self.language_preference)
         except OSError:

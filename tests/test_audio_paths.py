@@ -1,17 +1,28 @@
-import unittest
-import tempfile
 import ctypes
+import ntpath
 import os
+import posixpath
+import tempfile
+import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from radiostudio.services.audio_paths import audio_path_key, same_audio_path
 from radiostudio.services.music_library import MusicLibrary
 
 
 class AudioPathTests(unittest.TestCase):
+    @patch("radiostudio.services.audio_paths.os", SimpleNamespace(name="nt", path=ntpath, fspath=os.fspath))
     def test_windows_path_separator_and_case_variants_are_equal(self):
         self.assertTrue(same_audio_path(
             r"C:\Music\Artist\Song.mp3", "c:/music/artist/song.mp3"))
+
+    @patch("radiostudio.services.audio_paths.os", SimpleNamespace(name="posix", path=posixpath, fspath=os.fspath))
+    def test_linux_paths_preserve_case_and_literal_backslashes(self):
+        self.assertFalse(same_audio_path("/music/Song.mp3", "/music/song.mp3"))
+        self.assertFalse(same_audio_path(r"/music/a\b.mp3", "/music/a/b.mp3"))
+        self.assertTrue(same_audio_path("/music/artist/../Song.mp3", "/music/Song.mp3"))
 
     def test_distinct_paths_remain_distinct(self):
         self.assertFalse(same_audio_path(
@@ -21,6 +32,7 @@ class AudioPathTests(unittest.TestCase):
         self.assertTrue(same_audio_path("", ""))
         self.assertFalse(same_audio_path("", r"C:\Music\Song.mp3"))
 
+    @patch("radiostudio.services.audio_paths.os", SimpleNamespace(name="nt", path=ntpath, fspath=os.fspath))
     def test_path_keys_match_after_separator_and_case_normalization(self):
         self.assertEqual(
             audio_path_key(r"C:\Music\Artist\Song.mp3"),
@@ -58,12 +70,12 @@ class AudioPathTests(unittest.TestCase):
             with library._connect() as db:
                 db.executemany(
                     "INSERT INTO play_history(played_at, path, title) VALUES(?, ?, ?)",
-                    [(1000, r"C:\Music\Song.mp3", "Song"),
-                     (2000, "C:/Music/Song.mp3", "Song")])
+                    [(1000, "Music/Song.mp3", "Song"),
+                     (2000, "Music/Artist/../Song.mp3", "Song")])
 
             paths, _artists = library.latest_track_plays()
 
-        self.assertEqual(paths[audio_path_key(r"C:\Music\Song.mp3")], 2000)
+        self.assertEqual(paths[audio_path_key("Music/Song.mp3")], 2000)
 
     def test_autodj_history_query_limits_rows_to_repeat_cooldowns(self):
         with tempfile.TemporaryDirectory() as folder:

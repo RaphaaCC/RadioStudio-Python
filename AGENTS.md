@@ -4,7 +4,7 @@ Estas orientações valem para todo o repositório RadioStudio Python Sirius. Si
 
 ## Contexto do projeto
 
-- Aplicativo desktop para Windows feito em Python, PySide6/Qt, com reprodução de áudio, playlists, AutoDJ, Cart Wall, entradas ao vivo e transmissão.
+- Aplicativo desktop para Windows e Linux (Ubuntu/Debian com interface gráfica X11 ou Wayland), feito em Python, PySide6/Qt, com reprodução de áudio, playlists, AutoDJ, Cart Wall, entradas ao vivo e transmissão. Linux sem interface gráfica não faz parte do escopo de uso.
 - A pasta de código é o ambiente de desenvolvimento contínuo. Alterar `APP_VERSION` ou o código-fonte não significa que um executável foi compilado, publicado ou instalado.
 - A inicialização e a instância única ficam em `radiostudio/app.py`; nomes, versão, caminhos e extensões ficam em `radiostudio/config.py`.
 - A arquitetura é um único aplicativo Qt, mas tarefas em segundo plano e processos auxiliares podem existir. Não descreva o programa como um único processo do sistema sem conferir o caminho em questão.
@@ -60,11 +60,11 @@ Estas orientações valem para todo o repositório RadioStudio Python Sirius. Si
 
 ### Dados, caminhos e credenciais
 
-- `radiostudio/config.py` define os caminhos. Instalação usa `%APPDATA%\RadioStudioPython`; edição portable usa `RadioStudioPythonData` ao lado do executável quando gravável e recorre ao perfil do usuário se não for.
-- Nunca use nem modifique o perfil real `%APPDATA%\RadioStudioPython` durante testes. Isole a execução com `APPDATA` em uma pasta temporária exclusiva.
-- Não leia, imprima, registre, copie para backup ou versione senhas e tokens. Credenciais de transmissão são guardadas no Gerenciador de Credenciais do Windows; backups não as exportam.
+- `radiostudio/config.py` define os caminhos. Windows usa `%APPDATA%\RadioStudioPython`; Linux usa `$XDG_DATA_HOME/RadioStudioPython` (padrão `~/.local/share/RadioStudioPython`) e preserva o perfil legado `~/RadioStudioPython` quando aplicável. Edição portable usa `RadioStudioPythonData` ao lado do executável quando gravável e recorre ao perfil do usuário se não for. `RADIOSTUDIO_DATA_DIR` permite selecionar um perfil explícito nos dois sistemas.
+- Nunca use nem modifique o perfil real durante testes. Isole a execução com `RADIOSTUDIO_DATA_DIR` e `APPDATA` em uma pasta temporária exclusiva.
+- Não leia, imprima, registre, copie para backup ou versione senhas e tokens. Credenciais usam `keyring`: Gerenciador de Credenciais do Windows ou Secret Service da sessão gráfica Linux; backups não as exportam.
 - Ao alterar formatos de estado ou banco, preserve compatibilidade com dados existentes, trate JSON/SQLite corrompidos e faça backup ou migração recuperável antes de qualquer substituição. Nunca apague o banco real como atalho de teste.
-- Normalize caminhos de áudio com os helpers existentes em `radiostudio/services/audio_paths.py`; considere Windows sem diferenciar maiúsculas/minúsculas e caminhos equivalentes.
+- Normalize caminhos de áudio com os helpers existentes em `radiostudio/services/audio_paths.py`; considere Windows sem diferenciar maiúsculas/minúsculas e Linux preservando a distinção de caixa e barras invertidas literais.
 
 ### Interface e internacionalização
 
@@ -77,7 +77,7 @@ Estas orientações valem para todo o repositório RadioStudio Python Sirius. Si
 
 ## Testes e validação
 
-Use sempre o Python do projeto: `.venv\Scripts\python.exe`. Não instale dependências nem atualize pacotes sem necessidade para o pedido.
+Use sempre o Python do projeto: `.venv\Scripts\python.exe` no Windows ou `.venv/bin/python` no Linux. Não instale dependências nem atualize pacotes sem necessidade para o pedido.
 
 | Mudança | Testes para localizar primeiro |
 | --- | --- |
@@ -92,7 +92,8 @@ Use sempre o Python do projeto: `.venv\Scripts\python.exe`. Não instale depend�
 
 - Depois de mudar lógica, rode os testes afetados e a suíte completa: `python -m unittest discover -s tests -v`.
 - Para mudanças de interface, abra e feche a janela afetada com `QT_QPA_PLATFORM=offscreen`; use um `APPDATA` temporário. Confirme também estado inicial, valores restaurados e cancelamento/salvamento quando pertinentes.
-- Exemplo em PowerShell para isolar dados: `$env:QT_QPA_PLATFORM = 'offscreen'; $env:APPDATA = Join-Path $env:TEMP ('RadioStudioPython-test-' + [guid]::NewGuid().ToString('N'))`.
+- Exemplo em PowerShell para isolar dados: `$env:QT_QPA_PLATFORM = 'offscreen'; $env:APPDATA = Join-Path $env:TEMP ('RadioStudioPython-test-' + [guid]::NewGuid().ToString('N')); $env:RADIOSTUDIO_DATA_DIR = $env:APPDATA`.
+- No Linux, use `APPDATA` e `RADIOSTUDIO_DATA_DIR` temporários e rode `.venv/bin/python`. Bibliotecas Qt/áudio da distribuição devem estar instaladas; o teste de interface em `tests/desktop_smoke.py` pode rodar em Xvfb. Isso não implica suporte do aplicativo a uso sem interface gráfica.
 - Para integrações externas, mocks/testes locais não comprovam interoperabilidade real. Só declare um servidor, cliente Discord ou dispositivo como validado se foi realmente testado nesse ambiente e com autorização.
 - Evite testes redundantes que apenas repetem a implementação. Amplie a verificação somente para cobrir um risco concreto ou uma exigência deste arquivo.
 

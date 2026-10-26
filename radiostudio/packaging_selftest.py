@@ -1,9 +1,8 @@
-"""Non-destructive runtime checks for packaged Windows builds."""
+"""Non-destructive runtime checks for source and packaged desktop builds."""
 
 from __future__ import annotations
 
 import logging
-import os
 import subprocess
 from pathlib import Path
 
@@ -50,7 +49,7 @@ def run() -> int:
         import keyring
 
         backend = keyring.get_keyring()
-        if not backend:
+        if not backend or backend.priority <= 0:
             raise RuntimeError("O backend do Gerenciador de Credenciais não foi carregado")
 
         # Keep Qt objects alive until all checks finish; no file is played and no
@@ -63,6 +62,6 @@ def run() -> int:
         configure_exception_logging(APP_DIR)
         logger = logging.getLogger("radiostudio.packaging")
         logger.exception(
-            "Verificação do pacote falhou (APPDATA=%s)", os.getenv("APPDATA", "")
+            "Verificação do pacote falhou (perfil=%s)", APP_DIR
         )
         return 1

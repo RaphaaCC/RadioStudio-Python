@@ -47,6 +47,7 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     app.setApplicationName(APP_NAME)
+    app.setDesktopFileName("radiostudio")
     # On Windows, Qt appends applicationDisplayName to every native dialog
     # caption. The main window already sets its full name and version itself.
     app.setApplicationDisplayName("")
@@ -83,6 +84,7 @@ def main() -> int:
         return 0
     existing.abort()
     instance_server = QLocalServer(app)
+    instance_server.setSocketOptions(QLocalServer.UserAccessOption)
     if not instance_server.listen(INSTANCE_NAME):
         probe = QLocalSocket(app)
         probe.connectToServer(INSTANCE_NAME)

@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
+from radiostudio.services.audio_paths import audio_path_key
 from radiostudio.services.autodj import active_program, choose_track, filter_tracks
 from radiostudio.services.music_library import MusicLibrary
 from radiostudio.services.track_metadata import TrackMetadata
@@ -107,7 +108,7 @@ class AutoDJTests(unittest.TestCase):
             history = store.recent_history()
             self.assertEqual((history[0]["played_at"], history[0]["artist"], history[0]["album"]),
                              (1234.0, "Artist", "Album"))
-            self.assertEqual(store.latest_track_plays()[0][str(root / "Song One.mp3").casefold()], 1234)
+            self.assertEqual(store.latest_track_plays()[0][audio_path_key(root / "Song One.mp3")], 1234)
             store.remove_library(library_id)
             self.assertEqual(store.recent_history()[0]["title"], "Song One")
 

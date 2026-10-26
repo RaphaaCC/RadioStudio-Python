@@ -24,7 +24,7 @@ class ExplorerMixin:
         # Strip a trailing separator before adding one. Drive roots such as
         # ``C:\\`` already end with a separator; appending another would make
         # descendants fail the prefix check when that root is collapsed.
-        prefix = root_key.rstrip("\\/") + os.sep
+        prefix = root_key.rstrip(os.sep) + os.sep
         return candidate_key.startswith(prefix)
 
     @guarded
