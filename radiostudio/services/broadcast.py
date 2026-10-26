@@ -60,6 +60,16 @@ def encoded_queue_capacity(bitrate: int) -> int:
                       (ENCODED_CHUNK_BYTES * 8)))
 
 
+def _profile_http_base(profile: dict) -> str:
+    scheme = "https" if profile.get("tls") else "http"
+    host = str(profile.get("host") or "").strip()
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    url_host = f"[{host.replace('%', '%25')}]" if ":" in host else host
+    port = int(profile.get("http_port") or profile["port"])
+    return f"{scheme}://{url_host}:{port}"
+
+
 class PortInUseError(OSError):
     """The embedded listener cannot own the requested port."""
 
@@ -643,9 +653,7 @@ class RemoteSink:
 
     def listener_count(self) -> int | None:
         profile = self.profile
-        port = int(profile.get("http_port") or profile["port"])
-        scheme = "https" if profile.get("tls") else "http"
-        base = f"{scheme}://{profile['host']}:{port}"
+        base = _profile_http_base(profile)
         if profile["kind"] == "icecast":
             url = f"{base}/status-json.xsl"
         else:
@@ -1444,9 +1452,7 @@ class BroadcastManager:
         password = get_password(profile["id"] + ":metadata")
         if not password:
             return
-        port = int(profile.get("http_port") or profile["port"])
-        scheme = "https" if profile.get("tls") else "http"
-        base = f"{scheme}://{profile['host']}:{port}"
+        base = _profile_http_base(profile)
         if profile["kind"] == "icecast":
             query = urlencode({"mount": "/" + profile["mount"].lstrip("/"),
                                "mode": "updinfo", "song": title})

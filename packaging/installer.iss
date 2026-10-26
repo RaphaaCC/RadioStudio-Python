@@ -1,5 +1,5 @@
 ﻿#define AppName "RadioStudio Python Sirius"
-#define AppVersion "v1.0.2 Beta"
+#define AppVersion "v1.0.2 Stable"
 #define AppPublisher "Raemi Labs"
 #define BuildDir AddBackslash(SourcePath) + "..\build\dist\RadioStudio Python.dist"
 
@@ -59,7 +59,7 @@ AppSupportURL=https://raemi.xyz
 AppContact=raphael@raemi.xyz
 AppCopyright=Copyright (C) 2026 Raemi Labs
 VersionInfoVersion=1.0.2.0
-VersionInfoTextVersion=v1.0.2 Beta
+VersionInfoTextVersion=v1.0.2 Stable
 VersionInfoCompany=Raemi Labs
 VersionInfoDescription=RadioStudio Python Sirius
 VersionInfoProductName=RadioStudio Python Sirius
@@ -69,7 +69,7 @@ DisableProgramGroupPage=yes
 ShowLanguageDialog=no
 UninstallDisplayIcon={app}\RadioStudio Python.exe
 OutputDir={#SourcePath}..\release
-OutputBaseFilename=RadioStudio Python Sirius — v1.0.2 Beta — Setup
+OutputBaseFilename=RadioStudio Python Sirius — v1.0.2 Stable — x64 — Setup
 SetupIconFile={#SourcePath}..\radiostudio\assets\icon.ico
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -98,6 +98,7 @@ Filename: "{app}\RadioStudio Python.exe"; Description: "{cm:LaunchApp}"; Flags: 
 [Code]
 var
   AppLanguagePage: TInputOptionWizardPage;
+  LanguagePreferenceLoaded: Boolean;
 
 function AppLanguageName(Index: Integer): String;
 begin
@@ -114,9 +115,6 @@ begin
 end;
 
 procedure InitializeWizard;
-var
-  SavedLanguage: AnsiString;
-  Index: Integer;
 begin
   AppLanguagePage := CreateInputOptionPage(wpSelectDir,
     ExpandConstant('{cm:AppLanguageTitle}'),
@@ -131,11 +129,23 @@ begin
   AppLanguagePage.Add('繁體中文');
   AppLanguagePage.Add('简体中文');
   AppLanguagePage.SelectedValueIndex := 0;
-  if FileExists(ExpandConstant('{app}\language.cfg')) then begin
-    if LoadStringFromFile(ExpandConstant('{app}\language.cfg'), SavedLanguage) then begin
-      for Index := 0 to 7 do
-        if Trim(SavedLanguage) = AppLanguageName(Index) then
-          AppLanguagePage.SelectedValueIndex := Index;
+end;
+
+procedure CurPageChanged(CurPageID: Integer);
+var
+  SavedLanguage: AnsiString;
+  LanguagePath: String;
+  Index: Integer;
+begin
+  if (CurPageID = AppLanguagePage.ID) and (not LanguagePreferenceLoaded) then begin
+    LanguagePreferenceLoaded := True;
+    LanguagePath := AddBackslash(WizardDirValue) + 'language.cfg';
+    if FileExists(LanguagePath) then begin
+      if LoadStringFromFile(LanguagePath, SavedLanguage) then begin
+        for Index := 0 to 7 do
+          if Trim(SavedLanguage) = AppLanguageName(Index) then
+            AppLanguagePage.SelectedValueIndex := Index;
+      end;
     end;
   end;
 end;

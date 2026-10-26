@@ -1,6 +1,5 @@
 import unittest
 
-from PySide6.QtCore import QCoreApplication
 from PySide6.QtMultimedia import QMediaPlayer
 
 from radiostudio.ui.audio_pipeline import AudioPipelineMixin
@@ -69,10 +68,6 @@ class _MixHarness(PlaybackMixin):
 
 
 class FadeMixRegressionTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.app = QCoreApplication.instance() or QCoreApplication([])
-
     def test_local_monitor_volume_does_not_attenuate_broadcast_program(self):
         harness = _PipelineHarness()
 

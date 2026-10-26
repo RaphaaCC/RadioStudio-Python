@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from PySide6.QtMultimedia import QMediaPlayer
 
+from radiostudio.services.audio_paths import same_audio_path
 from radiostudio.ui.scheduler import SchedulerMixin
 
 
@@ -236,8 +237,11 @@ class SchedulerTests(unittest.TestCase):
                 "day": 0, "playlist_mode": "replace", "playback_mode": "after_current",
             })
 
-            self.assertEqual(harness.tracks,
-                             [str(path) for path in (tracks[0], tracks[1], tracks[2], tracks[4])])
+            expected_tracks = [str(path) for path in
+                               (tracks[0], tracks[1], tracks[2], tracks[4])]
+            self.assertEqual(len(harness.tracks), len(expected_tracks))
+            self.assertTrue(all(same_audio_path(actual, expected)
+                                for actual, expected in zip(harness.tracks, expected_tracks)))
             self.assertEqual(harness.current_index, 2)
             self.assertIsNone(harness.played_index)
 

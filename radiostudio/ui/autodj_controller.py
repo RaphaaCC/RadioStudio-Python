@@ -430,7 +430,8 @@ class AutoDJControllerMixin:
         try:
             path = str(path)
             metadata = None
-            if path == getattr(self, "_display_sync_path", ""):
+            if audio_path_key(path) == audio_path_key(
+                    getattr(self, "_display_sync_path", "")):
                 metadata = getattr(self, "_display_sync_metadata", None)
             if metadata is None:
                 library = getattr(self, "music_library", None)

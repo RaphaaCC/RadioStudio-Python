@@ -318,6 +318,54 @@ class BroadcastStartupTests(unittest.TestCase):
         self.assertEqual(sock.sent[0], b"secret\n")
         self.assertIn(b"icy-name:Test", sock.sent[1])
 
+    def test_listener_count_builds_valid_urls_for_ipv6_hosts(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b'{"icestats":{"source":{"listenurl":"http://[::1]:8000/live.mp3","listeners":3}}}'
+
+        sink = RemoteSink({"kind": "icecast", "host": "::1", "port": 8000,
+                           "mount": "/live.mp3"}, "secret")
+        with patch("radiostudio.services.broadcast.urlopen", return_value=Response()) as open_url:
+            self.assertEqual(sink.listener_count(), 3)
+        self.assertEqual(open_url.call_args.args[0], "http://[::1]:8000/status-json.xsl")
+
+        sink.profile["host"] = "[fe80::1%3]"
+        with patch("radiostudio.services.broadcast.urlopen", return_value=Response()) as open_url:
+            sink.listener_count()
+        self.assertEqual(open_url.call_args.args[0], "http://[fe80::1%253]:8000/status-json.xsl")
+
+    def test_metadata_updates_build_valid_urls_for_ipv6_hosts(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _size=-1):
+                return b"OK"
+
+        profile = {"id": "profile-ipv6", "kind": "icecast", "host": "[::1]",
+                   "port": 8000, "mount": "/live.mp3", "metadata_user": "admin"}
+        with patch("radiostudio.services.broadcast.get_password", return_value="secret"), \
+                patch("radiostudio.services.broadcast.urlopen", return_value=Response()) as open_url:
+            BroadcastManager._send_metadata(profile, "Track")
+        request = open_url.call_args.args[0]
+        self.assertEqual(request.full_url.split("?", 1)[0], "http://[::1]:8000/admin/metadata")
+
+        profile.update(kind="shoutcast", host="::1", stream_id=1)
+        with patch("radiostudio.services.broadcast.get_password", return_value="secret"), \
+                patch("radiostudio.services.broadcast.urlopen", return_value=Response()) as open_url:
+            BroadcastManager._send_metadata(profile, "Track")
+        self.assertTrue(open_url.call_args.args[0].full_url.startswith(
+            "http://[::1]:8000/admin.cgi?"))
+
     def test_icecast_uses_raw_put_body_with_expect_continue(self):
         sock = _FragmentedSocket(b"HTTP/1.1 100 Continue\r\n\r\n")
         sink = RemoteSink({"kind": "icecast", "host": "localhost", "port": 8000,

@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import os
+import re
+
+
+_WINDOWS_SHORT_PATH_COMPONENT = re.compile(r"~\d+(?:\.[^\\/]*)?(?:[\\/]|$)")
 
 
 def audio_path_key(path) -> str:
@@ -10,9 +14,21 @@ def audio_path_key(path) -> str:
     if not path:
         return ""
     try:
-        return os.path.normcase(os.path.normpath(os.fspath(path)))
+        raw_path = os.fspath(path)
     except (TypeError, ValueError):
         return str(path)
+    value = raw_path
+    # Path.resolve() on indexed files expands Windows 8.3 aliases, while Qt
+    # and playlists may retain names such as RUNNER~1. Resolve only paths that
+    # can contain such aliases; ordinary library rows stay on the cheap lexical
+    # normalization path during large catalog and history queries.
+    if (os.name == "nt" and isinstance(raw_path, str)
+            and _WINDOWS_SHORT_PATH_COMPONENT.search(raw_path)):
+        try:
+            value = os.path.realpath(raw_path)
+        except OSError:
+            value = raw_path
+    return os.path.normcase(os.path.normpath(value))
 
 
 def same_audio_path(left, right) -> bool:

@@ -34,7 +34,7 @@ ROOT = Path(__file__).resolve().parents[1]
 ASSET_DIR = ROOT / "radiostudio" / "assets"
 LOGO_FILE = ASSET_DIR / "logo-about-window.png"
 OUTPUT_FILE = ASSET_DIR / "manual_usuario.pdf"
-VERSION = "v1.0.2 Beta"
+VERSION = "v1.0.2 Stable"
 PAGE_WIDTH, PAGE_HEIGHT = A4
 
 NAVY = colors.HexColor("#071A3D")
@@ -270,7 +270,7 @@ class ManualDocTemplate(BaseDocTemplate):
 
 SECTIONS = [
     ("1. Comece por aqui", [
-        ("p", "O RadioStudio Python Sirius reúne uma fila de reprodução, automação de programação musical, entradas de áudio, gravações e saídas de transmissão. Este manual descreve a versão v1.0.2 Beta, cuja interface está disponível em sete idiomas."),
+        ("p", "O RadioStudio Python Sirius reúne uma fila de reprodução, automação de programação musical, entradas de áudio, gravações e saídas de transmissão. Este manual descreve a versão v1.0.2 Stable, cuja interface está disponível em sete idiomas."),
         ("callout", ("A reprodução local e o envio à transmissão compartilham o áudio do programa. O controle de volume local ajusta a monitoração no computador e não reduz o sinal transmitido. A pré-escuta usa uma saída separada.", False)),
         ("h2", "Uma rotina simples"),
         ("steps", [

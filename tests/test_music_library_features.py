@@ -1,7 +1,10 @@
 import base64
+import json
 import sqlite3
 import subprocess
 import tempfile
+import threading
+import time
 import unittest
 from contextlib import closing
 from pathlib import Path
@@ -47,6 +50,17 @@ class MusicLibraryFeatureTests(unittest.TestCase):
 
     def tearDown(self):
         self.temporary.cleanup()
+
+    def wait_for_catalog(self, panel, minimum_rows=0, timeout=4):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            if (panel._catalog_worker is None
+                    and panel._catalog_pending_request is None
+                    and panel.catalog_table.rowCount() >= minimum_rows):
+                return
+            time.sleep(0.01)
+        self.fail("O catálogo não terminou de atualizar no tempo esperado.")
 
     def test_internal_overlays_batch_metadata_collections_tags_and_undo(self):
         self.library.save_metadata(
@@ -146,6 +160,7 @@ class MusicLibraryFeatureTests(unittest.TestCase):
         main_window = SimpleNamespace(music_library=self.library)
         panel = LibraryPanel(main_window)
         try:
+            self.wait_for_catalog(panel, minimum_rows=1)
             panel.catalog_table.selectRow(0)
             with patch("radiostudio.ui.library_panel.QInputDialog.getItem",
                        return_value=("Keep", True)):
@@ -154,6 +169,7 @@ class MusicLibraryFeatureTests(unittest.TestCase):
             self.library.update_library(self.library_id, enabled=True)
             rows = self.library.catalog_tracks(collection_id=collection_id)
             self.assertEqual({Path(row["path"]).name for row in rows}, {"Alpha.mp3", "Gamma.mp3"})
+            self.wait_for_catalog(panel, minimum_rows=1)
             self.assertEqual(panel.catalog_table.item(0, 7).text(), "Keep")
         finally:
             panel.close()
@@ -248,6 +264,26 @@ class MusicLibraryFeatureTests(unittest.TestCase):
         self.assertTrue(self.library.undo_metadata(str(self.alpha), active=True))
         self.assertEqual(self.library.pending_file_tag_writes(), [])
         self.assertEqual(self.library.metadata_for_track(str(self.alpha)).title, "Alpha")
+
+    def test_multiple_active_file_edits_accumulate_until_track_is_released(self):
+        self.library.save_metadata(
+            str(self.alpha), {"title": "Queued title"},
+            custom_tags={"BPM": "120"}, target="file", active=True)
+        self.library.save_metadata(
+            str(self.alpha), {"genre": "Pop"},
+            custom_tags={"STATION_CODE": "RS-1"}, target="file", active=True)
+
+        pending = self.library.pending_file_tag_writes()
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(json.loads(pending[0]["fields_json"]),
+                         {"title": "Queued title", "genre": "Pop"})
+        self.assertEqual(json.loads(pending[0]["custom_tags_json"]),
+                         {"BPM": "120", "STATION_CODE": "RS-1"})
+
+        with patch("radiostudio.services.embedded_metadata.write_embedded_metadata") as write:
+            self.assertTrue(self.library.complete_pending_file_tag_write(str(self.alpha)))
+        self.assertEqual(write.call_args.args[1], {"title": "Queued title", "genre": "Pop"})
+        self.assertEqual(write.call_args.args[2], {"BPM": "120", "STATION_CODE": "RS-1"})
 
     def test_unsupported_active_file_is_rejected_instead_of_queuing_a_write(self):
         unsupported = self.root / "unsupported.ogg"
@@ -386,10 +422,77 @@ class MusicLibraryFeatureTests(unittest.TestCase):
         panel = LibraryPanel(main_window)
         try:
             panel.refresh_catalog()
+            self.wait_for_catalog(panel, minimum_rows=1)
             panel.catalog_table.selectRow(0)
             panel.catalog_table.doubleClicked.emit(panel.catalog_table.model().index(0, 0))
             main_window.add_audio_paths.assert_called_once_with([str(self.alpha.resolve())])
             main_window.play_index.assert_not_called()
+        finally:
+            panel.close()
+
+    def test_metadata_refresh_invalidates_discord_cache_when_playback_is_stopped(self):
+        main_window = SimpleNamespace(
+            music_library=self.library,
+            _discord_metadata_cache={"previous-track": object()},
+            current_index=-1,
+            tracks=[],
+            refresh_playlist=Mock(),
+            request_selected_cover=Mock(),
+        )
+        panel = SimpleNamespace(
+            main_window=main_window,
+            refresh_catalog=Mock(),
+            refresh_organization=Mock(),
+        )
+
+        LibraryPanel._refresh_metadata_consumers(panel)
+
+        self.assertEqual(main_window._discord_metadata_cache, {})
+
+    def test_catalog_queries_run_off_ui_thread_and_only_latest_filter_is_shown(self):
+        panel = LibraryPanel(SimpleNamespace(music_library=self.library))
+        try:
+            self.wait_for_catalog(panel, minimum_rows=1)
+            ui_thread = threading.get_ident()
+            first_started = threading.Event()
+            release_first = threading.Event()
+            query_threads = []
+            ui_updates = []
+            populate = panel._populate_catalog
+
+            def record_ui_update(tracks):
+                ui_updates.append(threading.get_ident())
+                populate(tracks)
+
+            def query(**options):
+                query_threads.append((options["search"], threading.get_ident()))
+                title = "Stale result"
+                if options["search"] == "slow":
+                    first_started.set()
+                    release_first.wait(2)
+                else:
+                    title = "Latest result"
+                return [{"path": str(self.alpha.resolve()), "title": title,
+                         "artist": "", "album": "", "genre": "", "year": "",
+                         "duration": 0, "tags": [], "collection_names": [],
+                         "group_names": []}]
+
+            with patch.object(self.library, "catalog_tracks", side_effect=query), \
+                    patch.object(panel, "_populate_catalog", side_effect=record_ui_update):
+                panel.search.setText("slow")
+                panel.catalog_refresh_timer.stop()
+                panel.refresh_catalog()
+                self.assertTrue(first_started.wait(1))
+                panel.search.setText("latest")
+                panel.catalog_refresh_timer.stop()
+                panel.refresh_catalog()
+                release_first.set()
+                self.wait_for_catalog(panel, minimum_rows=1)
+
+            self.assertEqual(panel.catalog_table.item(0, 0).text(), "Latest result")
+            self.assertEqual([value for value, _thread in query_threads], ["slow", "latest"])
+            self.assertTrue(all(thread != ui_thread for _value, thread in query_threads))
+            self.assertEqual(ui_updates, [ui_thread])
         finally:
             panel.close()
 

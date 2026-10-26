@@ -307,6 +307,38 @@ class RecordingServiceTests(unittest.TestCase):
                 self.assertNotEqual(output.readframes(1), b"\0\0\0\0")
             self.assertEqual(recorder.state, "stopped")
 
+    def test_stop_waits_for_a_frame_already_being_submitted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = RecordingSession(directory, "wav").start()
+            frame = pcm_frame()
+            enqueue_entered = threading.Event()
+            allow_enqueue = threading.Event()
+            original_put = recorder.queue.put_nowait
+            submitted = []
+            stopped = []
+
+            def blocked_enqueue(value):
+                enqueue_entered.set()
+                if not allow_enqueue.wait(2):
+                    raise TimeoutError("A liberação do teste não chegou")
+                original_put(value)
+
+            recorder.queue.put_nowait = blocked_enqueue
+            producer = threading.Thread(target=lambda: submitted.append(recorder.submit(frame)))
+            producer.start()
+            self.assertTrue(enqueue_entered.wait(2))
+            release_timer = threading.Timer(0.05, allow_enqueue.set)
+            release_timer.start()
+            stopped.append(recorder.stop())
+            release_timer.join(1)
+            producer.join(2)
+
+            self.assertFalse(producer.is_alive())
+            self.assertEqual(submitted, [True])
+            self.assertEqual(stopped, [True])
+            with wave.open(str(recorder.path), "rb") as output:
+                self.assertEqual(output.getnframes(), PCM_BYTES_PER_FRAME // 4)
+
     def test_mp3_is_encoded_from_synthetic_stereo_pcm(self):
         with tempfile.TemporaryDirectory() as directory:
             recorder = RecordingSession(directory, "mp3", 192).start()

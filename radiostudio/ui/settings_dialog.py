@@ -25,7 +25,7 @@ from ..services.process_priority import PROCESS_PRIORITY_OPTIONS
 from ..services.control_api import API_DEFAULT_PORT, api_connection_addresses, parse_allowed_origins
 from ..services.discord_presence import (
     ACTIVITY_TYPES, STATUS_DISPLAY_TYPES, unknown_presence_placeholders,
-    validate_public_cover_url, validate_public_radio_url,
+    validate_public_button_url, validate_public_cover_url,
 )
 from .icons import apply_app_icon, translated_icon_label, ui_icon
 
@@ -494,6 +494,7 @@ class SettingsDialog(QDialog):
         tabs.addTab(discord_page, translate("Discord"))
         self._discord_service = discord_service
         self._initial_discord_app_id = DISCORD_APPLICATION_ID
+        self._discord_initial_enabled = bool(discord_enabled)
         self.discord_verify.clicked.connect(self.verify_discord_connection)
         self.discord_enabled.toggled.connect(self.set_discord_controls_enabled)
         self.discord_enabled.toggled.connect(self.update_discord_offline_action)
@@ -828,23 +829,38 @@ class SettingsDialog(QDialog):
         if self._discord_service is None:
             self.set_discord_status(False, "O serviço de Rich Presence não está disponível.")
             return
+        if (getattr(self._discord_service, "connected", False)
+                and self._discord_service.client_id == DISCORD_APPLICATION_ID):
+            # A fresh probe would tear down the active RPC and clear the
+            # listener's current activity while this dialog is open.
+            self.set_discord_status(
+                self._discord_service.available, self._discord_service.status)
+            return
         self.discord_verify.setEnabled(False)
         self.discord_verify.setText(translate("Verificando…"))
+        enabled = bool(getattr(self._discord_service, "enabled",
+                               self.discord_enabled.isChecked()))
         self._discord_service.configure(
-            DISCORD_APPLICATION_ID, enabled=False, verify=True)
+            DISCORD_APPLICATION_ID, enabled=enabled, verify=True)
 
     def set_discord_status(self, available: bool, status: str) -> None:
         same_client = bool(self._discord_service
                            and self._discord_service.client_id == DISCORD_APPLICATION_ID)
         verified = bool(available and same_client)
+        connected = bool(same_client and getattr(self._discord_service, "connected", False))
+        if (status == "Conexão com o Discord verificada; Rich Presence desativada."
+                and self.discord_enabled.isChecked()):
+            status = ("Conexão com o Discord verificada. A Rich Presence será ativada "
+                      "ao salvar estas configurações.")
         self.discord_options.setVisible(verified)
-        self.discord_disable_offline.setVisible(not verified and self.discord_enabled.isChecked())
+        self.discord_disable_offline.setVisible(
+            not connected and self.discord_enabled.isChecked())
         if verified:
             self.discord_status.setText("✅ " + translate(status))
         else:
             self.discord_status.setText(translate(status))
         checking = not available and status.startswith("Verificando")
-        self.discord_verify.setEnabled(not checking)
+        self.discord_verify.setEnabled(not checking and not connected)
         self.discord_verify.setText(translate("Verificando…") if checking else
                                     translated_icon_label("🔌 Verificar conexão", "🔌"))
 
@@ -869,7 +885,8 @@ class SettingsDialog(QDialog):
 
     def update_discord_offline_action(self, _enabled: bool) -> None:
         connected = bool(self._discord_service and self._discord_service.available
-                         and self._discord_service.client_id == DISCORD_APPLICATION_ID)
+                         and self._discord_service.client_id == DISCORD_APPLICATION_ID
+                         and getattr(self._discord_service, "connected", False))
         self.discord_disable_offline.setVisible(not connected and self.discord_enabled.isChecked())
 
     def disable_discord_while_offline(self) -> None:
@@ -924,26 +941,30 @@ class SettingsDialog(QDialog):
                     return
             elif not self.control_api_token.text():
                 self.generate_control_api_token()
-        try:
-            validate_public_radio_url(self.discord_public_url.text())
-            validate_public_radio_url(self.discord_button2_url.text())
-            cover_url = validate_public_cover_url(self.discord_cover_url.text())
-            if (self.discord_enabled.isChecked() and self.discord_options.isVisible()
-                    and self.discord_share_track.isChecked()
-                    and self.discord_use_track_cover.isChecked() and not cover_url):
-                raise ValueError("Informe a URL pública que fornece a capa atual.")
-        except ValueError as exc:
-            show_warning(self, translate("Link público"), translate(str(exc)))
-            return
-        invalid_presence_tokens = sorted(set(
-            unknown_presence_placeholders(self.discord_details_template.text())
-            + unknown_presence_placeholders(self.discord_state_template.text())))
-        if invalid_presence_tokens:
-            show_warning(
-                self, translate("Rich Presence"), translate("Placeholders desconhecidos:") + " "
-                + ", ".join("%" + token for token in invalid_presence_tokens))
-            return
-        if self.discord_enabled.isChecked() and self.discord_options.isVisible():
+        discord_settings_active = (
+            self.discord_enabled.isChecked() and not self.discord_options.isHidden())
+        if discord_settings_active:
+            try:
+                validate_public_button_url(self.discord_public_url.text())
+                validate_public_button_url(self.discord_button2_url.text())
+                cover_url = validate_public_cover_url(self.discord_cover_url.text())
+                if (self.discord_share_track.isChecked()
+                        and self.discord_use_track_cover.isChecked() and not cover_url):
+                    raise ValueError("Informe a URL pública que fornece a capa atual.")
+            except ValueError as exc:
+                show_warning(self, translate("Link público"), translate(str(exc)))
+                return
+            invalid_presence_tokens = sorted(set(
+                unknown_presence_placeholders(self.discord_details_template.text())
+                + unknown_presence_placeholders(self.discord_state_template.text())))
+            if invalid_presence_tokens:
+                show_warning(
+                    self, translate("Rich Presence"),
+                    translate("Placeholders desconhecidos:") + " "
+                    + ", ".join("%" + token for token in invalid_presence_tokens))
+                return
+        if (self.discord_enabled.isChecked() and not self._discord_initial_enabled
+                and not self.discord_options.isHidden()):
             if not self._discord_service or not self._discord_service.available \
                     or self._discord_service.client_id != DISCORD_APPLICATION_ID:
                 show_warning(

@@ -111,4 +111,3 @@ class AudioInputsControllerMixin:
         self.apply_main_volume()
         self.mix_audio.setVolume(
             self.monitor_output_gain() * self.mix_gain * self.music_duck_gain)
-        self.apply_cart_local_volume()

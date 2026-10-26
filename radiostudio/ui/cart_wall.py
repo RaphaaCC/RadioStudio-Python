@@ -31,8 +31,7 @@ class CartWallMixin:
     def cart_local_volume(self):
         master = max(0.0, min(1.0, float(getattr(self, "master_live_volume", 1.0))))
         monitor = max(0.0, min(1.0, float(getattr(self, "monitor_volume", 1.0))))
-        duck = max(0.0, min(1.0, float(getattr(self, "music_duck_gain", 1.0))))
-        return master * monitor * CART_GAIN * duck
+        return master * monitor * CART_GAIN
 
     @guarded
     def apply_cart_local_volume(self):

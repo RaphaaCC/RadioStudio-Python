@@ -226,6 +226,75 @@ class TranslationCatalogTests(unittest.TestCase):
             if locale != "pt_BR":
                 self.assertNotIn("Saídas externas", message)
 
+    def test_discord_connection_statuses_are_translated_in_every_catalog(self):
+        connected = "Discord conectado; Rich Presence registrada."
+        waiting = "Discord conectado; Rich Presence aguardando reprodução."
+        verified_disabled = (
+            "Conexão com o Discord verificada; Rich Presence desativada.")
+        verified_pending_save = (
+            "Conexão com o Discord verificada. A Rich Presence será ativada "
+            "ao salvar estas configurações.")
+        button_url_limit = "O link de cada botão deve ter no máximo 512 caracteres."
+        disconnected = "A conexão com o Discord foi perdida; tentando novamente. ({error_type})"
+        presence_values = ("No ar", "Pausado", "Tocando", "Acessar site")
+        url_messages = (
+            "O link público é muito longo.",
+            "Informe um endereço HTTP ou HTTPS válido.",
+            "O link precisa começar com http:// ou https://.",
+            "O link não pode conter usuário ou senha.",
+            "Remova parâmetros e fragmentos do link antes de compartilhá-lo.",
+            "A porta do link é inválida.",
+            "Use um endereço público, não um endereço local da rede.",
+            "Informe o domínio público da rádio.",
+            "Endereços IP privados ou locais não podem ser compartilhados.",
+            "A URL da capa precisa ter no máximo 230 caracteres.",
+            "Informe a URL pública que fornece a capa atual.",
+        )
+        service_messages = (
+            "Abra o aplicativo Discord e verifique a conexão.",
+            "Verificando conexão e registro da Rich Presence…",
+            "Rich Presence desativada.",
+            "O Discord abriu o canal local, mas não respondeu a tempo. Confira se o aplicativo Discord está aberto e atualizado.",
+            "O Discord recusou o ID do aplicativo RadioStudio.",
+            "Não foi possível abrir o canal local do Discord. Abra o aplicativo Discord e tente novamente.",
+            "O Discord recusou o registro da Rich Presence. Consulte o log do aplicativo.",
+            "Falha na comunicação com o Discord ({error_type}).",
+        )
+        for locale, catalog in self.catalogs.items():
+            self.assertIn(connected, catalog, locale)
+            self.assertIn(waiting, catalog, locale)
+            self.assertIn(verified_disabled, catalog, locale)
+            self.assertIn(verified_pending_save, catalog, locale)
+            self.assertIn(button_url_limit, catalog, locale)
+            self.assertIn(disconnected, catalog, locale)
+            for source in presence_values:
+                self.assertIn(source, catalog, (locale, source))
+            for source in url_messages:
+                self.assertIn(source, catalog, (locale, source))
+            for source in service_messages:
+                self.assertIn(source, catalog, (locale, source))
+            if locale != "pt_BR":
+                self.assertNotEqual(translate(connected, locale), connected, locale)
+                self.assertNotEqual(translate(waiting, locale), waiting, locale)
+                self.assertNotEqual(translate(button_url_limit, locale), button_url_limit,
+                                    locale)
+                self.assertNotEqual(translate(verified_disabled, locale), verified_disabled,
+                                    locale)
+                self.assertNotEqual(translate(verified_pending_save, locale),
+                                    verified_pending_save, locale)
+                translated = translate(disconnected, locale).format(error_type="OSError")
+                self.assertIn("OSError", translated, locale)
+                self.assertNotIn("A conexão com o Discord", translated, locale)
+                for source in presence_values:
+                    self.assertNotEqual(translate(source, locale), source, (locale, source))
+                for source in url_messages:
+                    self.assertNotEqual(translate(source, locale), source,
+                                        (locale, source))
+                for source in service_messages:
+                    translated = translate(source, locale)
+                    self.assertNotEqual(translated, source, (locale, source))
+                    self.assertNotIn("Discord e verifique", translated, (locale, source))
+
     def test_autodj_feedback_is_catalogued_in_every_language(self):
         sources = (
             "Falha ao carregar o catálogo da Biblioteca para o AutoDJ.",

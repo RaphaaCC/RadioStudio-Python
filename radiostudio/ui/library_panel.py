@@ -82,6 +82,10 @@ class LibraryPanel(QWidget):
         self._writing_tags = False
         self._metadata_operation_running = False
         self._has_pending_tag_writes = bool(self.library.pending_file_tag_writes())
+        self._catalog_generation = 0
+        self._catalog_active_generation = 0
+        self._catalog_worker = None
+        self._catalog_pending_request = None
         self._history_last_id = 0
         self._history_refresh_timer = QTimer(self)
         self._history_refresh_timer.setSingleShot(True)
@@ -290,13 +294,50 @@ class LibraryPanel(QWidget):
     def refresh_catalog(self, *_args):
         if not hasattr(self, "catalog_table"):
             return
-        libraries = self.library_filter.currentData() if self.library_filter.count() else None
-        collection = self.collection_filter.currentData() if self.collection_filter.count() else None
-        tag = self.tag_filter.currentData() if self.tag_filter.count() else None
-        group_id = self.group_filter.currentData() if self.group_filter.count() else None
-        tracks = self.library.catalog_tracks(
-            search=self.search.text(), library_id=libraries, collection_id=collection,
-            tag=tag, group_id=group_id, sort_by=self.sort.currentData() or "title")
+        self._catalog_generation += 1
+        generation = self._catalog_generation
+        request = {
+            "search": self.search.text(),
+            "library_id": self.library_filter.currentData() if self.library_filter.count() else None,
+            "collection_id": self.collection_filter.currentData() if self.collection_filter.count() else None,
+            "tag": self.tag_filter.currentData() if self.tag_filter.count() else None,
+            "group_id": self.group_filter.currentData() if self.group_filter.count() else None,
+            "sort_by": self.sort.currentData() or "title",
+        }
+        if self._catalog_worker is not None:
+            self._catalog_pending_request = (generation, request)
+            return
+        self._start_catalog_request(generation, request)
+
+    def _start_catalog_request(self, generation, request):
+        worker = _LibraryWorker(lambda options: self.library.catalog_tracks(**options), request)
+        self._catalog_worker = worker
+        self._catalog_active_generation = generation
+        self._workers.add(worker)
+        worker.signals.finished.connect(self._catalog_loaded)
+        self.pool.start(worker, priority=-1)
+
+    @Slot(object)
+    @guarded
+    def _catalog_loaded(self, result):
+        generation = self._catalog_active_generation
+        worker, self._catalog_worker = self._catalog_worker, None
+        if worker is None:
+            return
+        self._workers.discard(worker)
+        if generation == self._catalog_generation:
+            if isinstance(result, Exception):
+                logging.getLogger("radiostudio").error(
+                    "Falha ao carregar o catálogo da Biblioteca: %s", result)
+                self.catalog_status.setText(translate("Falha ao carregar o catálogo da Biblioteca."))
+            else:
+                self._populate_catalog(result)
+        pending = self._catalog_pending_request
+        self._catalog_pending_request = None
+        if pending and pending[0] == self._catalog_generation:
+            self._start_catalog_request(*pending)
+
+    def _populate_catalog(self, tracks):
         self.catalog_table.setUpdatesEnabled(False)
         try:
             self.catalog_table.setRowCount(len(tracks))
@@ -525,9 +566,12 @@ class LibraryPanel(QWidget):
         self.refresh_catalog()
         self.refresh_organization()
         self.main_window.refresh_playlist(force=True)
+        # Metadata may have been cached for a previously played track even if
+        # playback is currently stopped. Invalidate the whole small cache so
+        # its next Rich Presence update sees the edited tags.
+        self.main_window._discord_metadata_cache.clear()
         if 0 <= self.main_window.current_index < len(self.main_window.tracks):
             self.main_window._display_sync_metadata = None
-            self.main_window._discord_metadata_cache.clear()
             self.main_window.refresh_playback_display()
             self.main_window.request_on_air_cover(
                 self.main_window.tracks[self.main_window.current_index])

@@ -37,7 +37,9 @@ from ..services.music_library import MusicLibrary
 from ..services.audio_inputs import AudioInputController, INPUT_CHANNELS, INPUT_LABELS
 from ..services.transition_analysis import TransitionAnalyzer
 from ..services.audio_decode_fallback import AudioDecodeFallback
-from ..services.discord_presence import DiscordPresenceService, make_activity
+from ..services.discord_presence import (
+    DiscordPresenceService, make_activity, playback_start_timestamp,
+)
 from ..services.control_api import (
     APICommandBridge, API_DEFAULT_PORT, APIError, ControlAPIServer,
     get_api_basic_credentials, get_api_token, parse_allowed_origins,
@@ -148,12 +150,13 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         self.discord_details_template = "🎵 %title"
         self.discord_state_template = "%artist · %station · %status"
         self.discord_large_text = "RadioStudio Python Sirius"
-        self.discord_button1_label = "Ouvir a rádio"
+        self.discord_button1_label = translate("Ouvir a rádio")
         self.discord_button2_label = ""
         self.discord_button2_url = ""
         self.discord_presence = DiscordPresenceService(self)
         self._discord_track_signature = None
         self._discord_track_started_at = 0
+        self._discord_was_paused = False
         self._discord_metadata_cache = {}
         self.player_controls_position = "bottom"
         self.waveform_style = "bars"
@@ -1078,6 +1081,9 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         if not self.discord_client_id or not self.discord_enabled:
             # Rich Presence is disabled by default. Skip player, path, and tag
             # work on every one-second UI tick until the user enables it.
+            self._discord_track_signature = None
+            self._discord_track_started_at = 0
+            self._discord_was_paused = False
             if not self.discord_client_id:
                 self.discord_presence.set_activity({})
             return
@@ -1094,7 +1100,8 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
         broadcasting = bool(self.broadcast.running)
 
         metadata = None
-        if (playing or paused) and 0 <= active_index < len(self.tracks):
+        if (self.discord_share_track and (playing or paused)
+                and 0 <= active_index < len(self.tracks)):
             track_path = self.tracks[active_index]
             path_key = audio_path_key(track_path)
             metadata = self._discord_metadata_cache.get(path_key)
@@ -1110,63 +1117,52 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
                     self._discord_metadata_cache.pop(next(iter(self._discord_metadata_cache)))
                 self._discord_metadata_cache[path_key] = metadata
         if metadata:
-            signature = metadata.path
-            if signature != self._discord_track_signature:
-                self._discord_track_signature = signature
-                self._discord_track_started_at = int(time.time() - max(0, active_player.position()) / 1000)
+            signature = (audio_path_key(metadata.path), active_index)
+            position_ms = max(0, int(active_player.position()))
+            self._discord_track_started_at = playback_start_timestamp(
+                position_ms,
+                previous_start=self._discord_track_started_at,
+                force_reset=(signature != self._discord_track_signature
+                             or playing and self._discord_was_paused),
+            )
+            self._discord_track_signature = signature
+            self._discord_was_paused = paused
             start_time = self._discord_track_started_at
+            if not playing:
+                start_time = None
             duration_ms = max(0, int(active_player.duration()))
             duration_seconds = duration_ms / 1000 if duration_ms else metadata.duration
-            end_time = start_time + int(duration_seconds) if duration_seconds > 0 else None
+            end_time = (self._discord_track_started_at + int(duration_seconds)
+                        if duration_seconds > 0 else None)
             title, artist = metadata.title, metadata.artist
         else:
             self._discord_track_signature = None
             self._discord_track_started_at = 0
+            self._discord_was_paused = False
             start_time = end_time = None
             title = artist = ""
 
-        try:
-            activity = make_activity(
-                title=title, artist=artist, album=metadata.album if metadata else "",
-                station=self.station_metadata.get("name", "RadioStudio Python"),
-                broadcasting=broadcasting, playing=playing, paused=paused,
-                share_track=self.discord_share_track,
-                public_url=self.discord_public_url,
-                large_image=self.discord_large_image,
-                cover_url=(self.discord_cover_url if self.discord_use_track_cover else ""),
-                cover_version=self._discord_cover_version,
-                activity_name=self.discord_activity_name,
-                activity_type=self.discord_activity_type,
-                status_display_type=self.discord_status_display_type,
-                details_template=self.discord_details_template,
-                state_template=self.discord_state_template,
-                large_text=self.discord_large_text,
-                button1_label=self.discord_button1_label,
-                button2_label=self.discord_button2_label,
-                button2_url=self.discord_button2_url,
-                started_at=start_time, ends_at=end_time)
-        except ValueError as exc:
-            logging.getLogger("radiostudio.discord").warning(
-                "Link público de Rich Presence ignorado: %s", exc)
-            self.discord_public_url = ""
-            self.discord_button2_url = ""
-            activity = make_activity(
-                title=title, artist=artist, album=metadata.album if metadata else "",
-                station=self.station_metadata.get("name", "RadioStudio Python"),
-                broadcasting=broadcasting, playing=playing, paused=paused,
-                share_track=self.discord_share_track,
-                large_image=self.discord_large_image,
-                activity_name=self.discord_activity_name,
-                activity_type=self.discord_activity_type,
-                status_display_type=self.discord_status_display_type,
-                details_template=self.discord_details_template,
-                state_template=self.discord_state_template,
-                large_text=self.discord_large_text,
-                button1_label=self.discord_button1_label,
-                button2_label=self.discord_button2_label,
-                button2_url=self.discord_button2_url,
-                started_at=start_time, ends_at=end_time)
-        self.discord_presence.set_activity(activity)
+        activity = make_activity(
+            title=title, artist=artist, album=metadata.album if metadata else "",
+            station=self.station_metadata.get("name", "RadioStudio Python"),
+            broadcasting=broadcasting, playing=playing, paused=paused,
+            share_track=self.discord_share_track,
+            public_url=self.discord_public_url,
+            large_image=self.discord_large_image,
+            cover_url=(self.discord_cover_url if self.discord_use_track_cover else ""),
+            cover_version=self._discord_cover_version,
+            activity_name=self.discord_activity_name,
+            activity_type=self.discord_activity_type,
+            status_display_type=self.discord_status_display_type,
+            details_template=self.discord_details_template,
+            state_template=self.discord_state_template,
+            large_text=self.discord_large_text,
+            button1_label=self.discord_button1_label,
+            button2_label=self.discord_button2_label,
+            button2_url=self.discord_button2_url,
+            started_at=start_time, ends_at=end_time)
+        self.discord_presence.set_activity(
+            activity, urgent=True)
 
     @guarded
     def setup_tray(self):

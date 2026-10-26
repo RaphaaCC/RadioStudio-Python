@@ -6,6 +6,8 @@ from unittest.mock import Mock, patch
 from PySide6.QtCore import QProcess
 from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 
+from radiostudio.config import DISCORD_APPLICATION_ID
+from radiostudio.i18n import current_language, set_language, translate
 from radiostudio.services.track_metadata import DEFAULT_STATION_METADATA
 from radiostudio.ui.settings_dialog import SettingsDialog
 from radiostudio.ui import settings_controller
@@ -61,6 +63,128 @@ class SettingsDialogRegressionTests(unittest.TestCase):
                 dialog.metadata_update_mode.findData("track_change"))
             self.assertFalse(dialog.metadata_update_interval.isEnabled())
             self.assertEqual(dialog.values()[4:6], ("track_change", 47))
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self.app.processEvents()
+
+    def test_discord_connection_status_uses_the_selected_language(self):
+        previous_language = current_language()
+        set_language("en_US")
+        service = SimpleNamespace(
+            availability_changed=SimpleNamespace(connect=Mock()),
+            available=True,
+            client_id=DISCORD_APPLICATION_ID,
+            status="Discord conectado; Rich Presence registrada.",
+        )
+        dialog = SettingsDialog(
+            "", "", True, DEFAULT_STATION_METADATA, discord_service=service)
+        try:
+            self.assertEqual(
+                dialog.discord_status.text(),
+                "✅ " + translate("Discord conectado; Rich Presence registrada."))
+            dialog.set_discord_status(
+                True, "Conexão com o Discord verificada; Rich Presence desativada.")
+            self.assertEqual(
+                dialog.discord_status.text(),
+                "✅ " + translate(
+                    "Conexão com o Discord verificada; Rich Presence desativada."))
+            dialog.discord_enabled.setChecked(True)
+            dialog.set_discord_status(
+                True, "Conexão com o Discord verificada; Rich Presence desativada.")
+            self.assertEqual(
+                dialog.discord_status.text(),
+                "✅ " + translate(
+                    "Conexão com o Discord verificada. A Rich Presence será ativada "
+                    "ao salvar estas configurações."))
+            dialog.set_discord_status(
+                True, "Discord conectado; Rich Presence aguardando reprodução.")
+            self.assertEqual(
+                dialog.discord_status.text(),
+                "✅ " + translate(
+                    "Discord conectado; Rich Presence aguardando reprodução."))
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self.app.processEvents()
+            set_language(previous_language)
+
+    def test_discord_button_url_limit_is_explained_before_saving(self):
+        service = SimpleNamespace(
+            availability_changed=SimpleNamespace(connect=Mock()),
+            available=True,
+            client_id=DISCORD_APPLICATION_ID,
+            status="Discord conectado; Rich Presence aguardando reprodução.",
+        )
+        dialog = SettingsDialog(
+            "", "", True, DEFAULT_STATION_METADATA,
+            discord_service=service, discord_enabled=True)
+        try:
+            dialog.discord_public_url.setText(
+                "https://radio.example/" + "x" * 512)
+            with patch("radiostudio.ui.settings_dialog.show_warning") as warning:
+                dialog.accept()
+            warning.assert_called_once()
+            self.assertIn("512", warning.call_args.args[2])
+            self.assertEqual(dialog.result(), QDialog.DialogCode.Rejected)
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self.app.processEvents()
+
+    def test_disabled_legacy_discord_links_do_not_block_unrelated_settings(self):
+        dialog = SettingsDialog("", "", True, DEFAULT_STATION_METADATA)
+        try:
+            dialog.discord_public_url.setText("not a valid URL")
+            dialog.discord_button2_url.setText("file:///private/track.mp3")
+            with patch("radiostudio.ui.settings_dialog.show_warning") as warning:
+                dialog.accept()
+            warning.assert_not_called()
+            self.assertEqual(dialog.result(), QDialog.DialogCode.Accepted)
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self.app.processEvents()
+
+    def test_verifying_discord_does_not_interrupt_an_active_presence(self):
+        service = SimpleNamespace(
+            availability_changed=SimpleNamespace(connect=Mock()),
+            available=True,
+            connected=True,
+            client_id=DISCORD_APPLICATION_ID,
+            status="Discord conectado; Rich Presence registrada.",
+            configure=Mock(),
+        )
+        dialog = SettingsDialog(
+            "", "", True, DEFAULT_STATION_METADATA,
+            discord_service=service, discord_enabled=True)
+        try:
+            dialog.verify_discord_connection()
+            service.configure.assert_not_called()
+            self.assertEqual(dialog.discord_status.text(),
+                             "✅ " + translate("Discord conectado; Rich Presence registrada."))
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+            self.app.processEvents()
+
+    def test_verifying_disconnected_enabled_presence_preserves_running_setting(self):
+        service = SimpleNamespace(
+            availability_changed=SimpleNamespace(connect=Mock()),
+            available=False,
+            connected=False,
+            enabled=True,
+            client_id=DISCORD_APPLICATION_ID,
+            status="Discord conectado; Rich Presence aguardando reprodução.",
+            configure=Mock(),
+        )
+        dialog = SettingsDialog(
+            "", "", True, DEFAULT_STATION_METADATA,
+            discord_service=service, discord_enabled=True)
+        try:
+            dialog.verify_discord_connection()
+            service.configure.assert_called_once_with(
+                DISCORD_APPLICATION_ID, enabled=True, verify=True)
         finally:
             dialog.close()
             dialog.deleteLater()

@@ -27,7 +27,7 @@ class AudioPipelineMixin:
                 or fmt.sampleFormat() != QAudioFormat.Int16):
             self.statusBar().showMessage(translate("Formato de áudio incompatível com a transmissão"))
             return
-        if source_id in ("main", "mix") or source_id.startswith("cart-"):
+        if source_id in ("main", "mix"):
             gain *= getattr(self, "music_duck_gain", 1.0)
         self.broadcast.push_audio(source_id, bytes(buffer.data()), gain)
 

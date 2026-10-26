@@ -632,15 +632,31 @@ class MusicLibrary:
                 after["cover_mime"] = ""
         elif target == "file" and active:
             with self._connect() as db:
+                pending = db.execute(
+                    "SELECT * FROM pending_tag_writes WHERE path_key=?", (key,)
+                ).fetchone()
+                pending_fields = self._json_object(pending["fields_json"]) if pending else {}
+                pending_fields.update(selected)
+                pending_tags = self._json_object(pending["custom_tags_json"]) if pending else {}
+                if custom_tags is not None:
+                    pending_tags.update(tags)
+                pending_cover_mime = str(cover_mime or "")
+                pending_cover_data = cover_data
+                pending_clear_cover = bool(clear_cover)
+                if pending and cover_data is None and not clear_cover:
+                    pending_cover_mime = str(pending["cover_mime"] or "")
+                    pending_cover_data = (bytes(pending["cover_data"])
+                                          if pending["cover_data"] is not None else None)
+                    pending_clear_cover = bool(pending["clear_cover"])
                 db.execute("""INSERT INTO pending_tag_writes(path_key,path,fields_json,
                     custom_tags_json,cover_mime,cover_data,clear_cover,queued_at)
                     VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(path_key) DO UPDATE SET
                     fields_json=excluded.fields_json, custom_tags_json=excluded.custom_tags_json,
                     cover_mime=excluded.cover_mime, cover_data=excluded.cover_data,
                     clear_cover=excluded.clear_cover, queued_at=excluded.queued_at""",
-                    (key, canonical_path, json.dumps(selected, ensure_ascii=False),
-                     json.dumps(tags, ensure_ascii=False), str(cover_mime or ""), cover_data,
-                     int(bool(clear_cover)), time.time()))
+                    (key, canonical_path, json.dumps(pending_fields, ensure_ascii=False),
+                     json.dumps(pending_tags, ensure_ascii=False), pending_cover_mime,
+                     pending_cover_data, int(pending_clear_cover), time.time()))
 
         def snapshot(value):
             data = dict(value)

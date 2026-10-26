@@ -17,6 +17,7 @@ from ..services.process_priority import apply_process_priority, normalize_proces
 from ..services.recording import sanitize_recording_schedules, SUPPORTED_BITRATES
 from ..services.schedule_engine import normalize_event
 from .recording_panel import default_recording_folder
+from ..i18n import SUPPORTED_LANGUAGES, translate
 
 
 def _tuple_tree(value):
@@ -53,6 +54,16 @@ def _state_bool(state, key, default=False):
     if type(value) is int and value in (0, 1):
         return bool(value)
     return False
+
+
+def localized_discord_button_default(value):
+    """Migrate a saved built-in button caption to the current UI language."""
+    source = "Ouvir a rádio"
+    saved = str(value or "").strip()
+    known_defaults = {translate(source, locale) for _label, locale in SUPPORTED_LANGUAGES}
+    if not saved or saved in known_defaults:
+        return translate(source)
+    return saved[:32]
 
 
 class PersistenceMixin:
@@ -282,8 +293,8 @@ class PersistenceMixin:
             self.discord_large_text = str(
                 state.get("discord_large_text", "RadioStudio Python Sirius")
                 or "RadioStudio Python Sirius")[:128]
-            self.discord_button1_label = str(
-                state.get("discord_button1_label", "Ouvir a rádio") or "Ouvir a rádio")[:32]
+            self.discord_button1_label = localized_discord_button_default(
+                state.get("discord_button1_label", ""))
             self.discord_button2_label = str(state.get("discord_button2_label", "") or "")[:32]
             try:
                 self.discord_button2_url = validate_public_radio_url(

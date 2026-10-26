@@ -15,6 +15,18 @@ class ExplorerMixin:
     def _explorer_path_key(path):
         return os.path.normcase(os.path.abspath(str(path)))
 
+    @classmethod
+    def _explorer_subtree_contains(cls, root, candidate):
+        root_key = cls._explorer_path_key(root)
+        candidate_key = cls._explorer_path_key(candidate)
+        if candidate_key == root_key:
+            return True
+        # Strip a trailing separator before adding one. Drive roots such as
+        # ``C:\\`` already end with a separator; appending another would make
+        # descendants fail the prefix check when that root is collapsed.
+        prefix = root_key.rstrip("\\/") + os.sep
+        return candidate_key.startswith(prefix)
+
     @guarded
     def open_explorer_folder(self, path, persist=False):
         folder = Path(path).expanduser()
@@ -203,12 +215,9 @@ class ExplorerMixin:
         raw_path = self.file_model.filePath(index)
         if not raw_path:
             return
-        path = self._explorer_path_key(raw_path)
-        prefix = path + os.sep
         self._explorer_expanded_paths = {
             item for item in self._explorer_expanded_paths
-            if (self._explorer_path_key(item) != path
-                and not self._explorer_path_key(item).startswith(prefix))
+            if not self._explorer_subtree_contains(raw_path, item)
         }
         if not self._explorer_expanded_paths and not self._explorer_mode_switching:
             self._use_debounced_explorer_watcher()

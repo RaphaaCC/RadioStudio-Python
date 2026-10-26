@@ -8,7 +8,12 @@ from unittest.mock import patch
 from PySide6.QtCore import QUrl
 from PySide6.QtMultimedia import QMediaPlayer
 
-from radiostudio.ui.persistence import PersistenceMixin, _state_bool
+from radiostudio.i18n import SUPPORTED_LANGUAGES, set_language, translate
+from radiostudio.ui.persistence import (
+    PersistenceMixin,
+    _state_bool,
+    localized_discord_button_default,
+)
 import radiostudio.ui.persistence as persistence
 
 
@@ -44,6 +49,24 @@ class _PlaybackCaptureHarness(PersistenceMixin):
 
 
 class PersistenceRegressionTests(unittest.TestCase):
+    def test_saved_builtin_discord_button_caption_tracks_interface_language(self):
+        default_labels = {
+            translate("Ouvir a rádio", locale)
+            for _label, locale in SUPPORTED_LANGUAGES
+        }
+        try:
+            for _label, locale in SUPPORTED_LANGUAGES:
+                set_language(locale)
+                expected = translate("Ouvir a rádio", locale)
+                for saved in default_labels | {""}:
+                    with self.subTest(locale=locale, saved=saved):
+                        self.assertEqual(localized_discord_button_default(saved), expected)
+                self.assertEqual(
+                    localized_discord_button_default("My custom button"),
+                    "My custom button")
+        finally:
+            set_language("pt_BR")
+
     def test_saved_boolean_rejects_truthy_text_and_accepts_legacy_zero_one(self):
         self.assertFalse(_state_bool({"enabled": "false"}, "enabled", True))
         self.assertFalse(_state_bool({"enabled": 0}, "enabled", True))

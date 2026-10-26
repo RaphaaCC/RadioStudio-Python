@@ -1,5 +1,7 @@
 import unittest
 import tempfile
+import ctypes
+import os
 from pathlib import Path
 
 from radiostudio.services.audio_paths import audio_path_key, same_audio_path
@@ -23,6 +25,32 @@ class AudioPathTests(unittest.TestCase):
         self.assertEqual(
             audio_path_key(r"C:\Music\Artist\Song.mp3"),
             audio_path_key("c:/music/artist/song.mp3"))
+
+    @unittest.skipUnless(os.name == "nt", "Windows 8.3 path aliases are Windows-specific")
+    def test_metadata_overlay_matches_short_and_long_windows_paths(self):
+        with tempfile.TemporaryDirectory(prefix="radiostudio-path-alias-") as folder:
+            media = Path(folder) / "a long audio filename.mp3"
+            media.write_bytes(b"placeholder audio")
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            get_short_path = kernel32.GetShortPathNameW
+            get_short_path.argtypes = (ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint)
+            get_short_path.restype = ctypes.c_uint
+            required = get_short_path(str(media), None, 0)
+            if not required:
+                self.skipTest("O volume de teste não fornece nomes curtos 8.3.")
+            buffer = ctypes.create_unicode_buffer(required + 1)
+            if not get_short_path(str(media), buffer, len(buffer)):
+                self.skipTest("Não foi possível obter o caminho curto 8.3.")
+            short_path = buffer.value
+            if os.path.normcase(short_path) == os.path.normcase(str(media)):
+                self.skipTest("O caminho de teste não possui alias curto 8.3.")
+
+            library = MusicLibrary(Path(folder) / "library.sqlite3")
+            library.save_metadata(str(media), {"title": "Overlay survives alias"})
+
+            self.assertEqual(audio_path_key(str(media)), audio_path_key(short_path))
+            self.assertEqual(library.metadata_for_track(short_path).title,
+                             "Overlay survives alias")
 
     def test_play_history_merges_path_variants_using_the_latest_timestamp(self):
         with tempfile.TemporaryDirectory() as folder:

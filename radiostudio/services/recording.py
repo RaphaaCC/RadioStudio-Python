@@ -110,17 +110,20 @@ class RecordingSession:
             return max(0.0, end - self._started_at - self._paused_seconds)
 
     def submit(self, pcm: bytes) -> bool:
+        frame = bytes(pcm) if pcm else b""
         with self._lock:
             if self.state != "recording":
                 return False
-        if not pcm:
+            if not frame:
+                return True
+            try:
+                # Enqueue while holding the state lock so stop() cannot signal
+                # the writer between the state check and the final audio frame.
+                self.queue.put_nowait(frame)
+            except queue.Full:
+                self._fail("A fila da gravação encheu; a sessão foi interrompida para proteger o áudio ao vivo")
+                return False
             return True
-        try:
-            self.queue.put_nowait(bytes(pcm))
-            return True
-        except queue.Full:
-            self._fail("A fila da gravação encheu; a sessão foi interrompida para proteger o áudio ao vivo")
-            return False
 
     def pause(self) -> bool:
         with self._lock:
