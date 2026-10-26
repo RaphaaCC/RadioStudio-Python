@@ -4,6 +4,7 @@ import builtins
 import os
 import tempfile
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 
@@ -14,10 +15,12 @@ class ConfigPathTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.home = Path(self.temporary.name)
-        self.enterContext(patch.dict(os.environ, {}, clear=True))
-        self.enterContext(patch.object(Path, "home", return_value=self.home))
-        self.enterContext(patch.object(builtins, "_RADIOSTUDIO_PORTABLE", False, create=True))
+        self.home = Path(self.temporary.name).resolve()
+        self.contexts = ExitStack()
+        self.addCleanup(self.contexts.close)
+        self.contexts.enter_context(patch.dict(os.environ, {}, clear=True))
+        self.contexts.enter_context(patch.object(Path, "home", return_value=self.home))
+        self.contexts.enter_context(patch.object(builtins, "_RADIOSTUDIO_PORTABLE", False, create=True))
 
     def test_windows_keeps_existing_roaming_profile(self):
         with patch.object(config.sys, "platform", "win32"):

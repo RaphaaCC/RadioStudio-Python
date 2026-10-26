@@ -139,7 +139,11 @@ class AutoDJTests(unittest.TestCase):
             try:
                 self.assertIs(iter(entries), entries)
             finally:
-                entries.close()
+                # Path.iterdir() returns a map instead of a generator on
+                # Python 3.13; only generator iterators expose close().
+                close = getattr(entries, "close", None)
+                if close is not None:
+                    close()
 
     def test_history_after_id_only_returns_newer_play_ids(self):
         with tempfile.TemporaryDirectory() as folder:
