@@ -357,6 +357,25 @@ def openapi_document(auth_mode: str | None = None) -> dict:
                               "405": error_response, "500": error_response,
                               "503": error_response, "504": error_response},
             }, "options": options_operation},
+            "/broadcast": {"get": {
+                "operationId": "getBroadcastStatus",
+                "summary": "Read transmission, station, now-playing and cover revision",
+                "security": security,
+                "responses": {"200": json_response("Live broadcast status", {"type": "object"}),
+                              "401": error_response, "403": error_response,
+                              "405": error_response, "500": error_response,
+                              "503": error_response, "504": error_response},
+            }, "options": options_operation},
+            "/broadcast/cover": {"get": {
+                "operationId": "getBroadcastCover",
+                "summary": "Read the current broadcast cover image",
+                "security": security,
+                "responses": {"200": {"description": "Current cover image bytes"},
+                              "401": error_response, "403": error_response,
+                              "404": error_response, "405": error_response,
+                              "500": error_response, "503": error_response,
+                              "504": error_response},
+            }, "options": options_operation},
             "/playback": {"post": {
                 "operationId": "controlPlayback",
                 "summary": "Control playback",
@@ -634,6 +653,31 @@ class ControlAPIServer:
                     self._send_error(HTTPStatus.INTERNAL_SERVER_ERROR, "internal_error",
                                      "The request could not be completed.", origin=origin)
                     return
+                if operation == "broadcast_cover":
+                    data = result.get("data") if isinstance(result, dict) else None
+                    if not data:
+                        self._send_error(HTTPStatus.NOT_FOUND, "cover_not_found",
+                                         "No current broadcast cover is available.", origin=origin)
+                        return
+                    body = bytes(data)
+                    if len(body) > 8 * 1024 * 1024:
+                        self._send_error(HTTPStatus.INTERNAL_SERVER_ERROR, "cover_too_large",
+                                         "The current cover exceeds the API limit.", origin=origin)
+                        return
+                    self.send_response(HTTPStatus.OK)
+                    self.send_header("Content-Type", str(result.get("mime_type") or "application/octet-stream"))
+                    self.send_header("Content-Length", str(len(body)))
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("X-Content-Type-Options", "nosniff")
+                    for name, value in self._cors_headers(origin):
+                        self.send_header(name, value)
+                    self.end_headers()
+                    if self.command != "HEAD":
+                        try:
+                            self.wfile.write(body)
+                        except (BrokenPipeError, ConnectionResetError, OSError):
+                            pass
+                    return
                 self._send_json(HTTPStatus.OK, result if isinstance(result, dict) else {},
                                 origin=origin)
 
@@ -645,6 +689,7 @@ class ControlAPIServer:
                     return
                 if self.path.partition("?")[0] not in {
                         f"{API_PREFIX}/status", f"{API_PREFIX}/queue",
+                        f"{API_PREFIX}/broadcast", f"{API_PREFIX}/broadcast/cover",
                         f"{API_PREFIX}/playback", f"{API_PREFIX}/queue/order",
                         f"{API_PREFIX}/openapi.json"}:
                     self._send_error(HTTPStatus.NOT_FOUND, "not_found", "Endpoint not found.",
@@ -669,6 +714,10 @@ class ControlAPIServer:
                     self._dispatch("status", {}, origin)
                 elif route == f"{API_PREFIX}/queue":
                     self._dispatch("queue", {}, origin)
+                elif route == f"{API_PREFIX}/broadcast":
+                    self._dispatch("broadcast", {}, origin)
+                elif route == f"{API_PREFIX}/broadcast/cover":
+                    self._dispatch("broadcast_cover", {}, origin)
                 elif route in {
                         f"{API_PREFIX}/playback", f"{API_PREFIX}/queue/order",
                         f"{API_PREFIX}/openapi.json"}:
@@ -687,6 +736,7 @@ class ControlAPIServer:
                     route = self.path.partition("?")[0]
                     if route in {
                             f"{API_PREFIX}/status", f"{API_PREFIX}/queue",
+                            f"{API_PREFIX}/broadcast", f"{API_PREFIX}/broadcast/cover",
                             f"{API_PREFIX}/queue/order", f"{API_PREFIX}/openapi.json"}:
                         self._method_not_allowed(origin)
                     else:
@@ -742,6 +792,8 @@ class ControlAPIServer:
                 routes = {
                     f"{API_PREFIX}/status": "GET, OPTIONS",
                     f"{API_PREFIX}/queue": "GET, OPTIONS",
+                    f"{API_PREFIX}/broadcast": "GET, OPTIONS",
+                    f"{API_PREFIX}/broadcast/cover": "GET, OPTIONS",
                     f"{API_PREFIX}/playback": "POST, OPTIONS",
                     f"{API_PREFIX}/queue/order": "PUT, OPTIONS",
                     f"{API_PREFIX}/openapi.json": "GET, OPTIONS",

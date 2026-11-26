@@ -43,6 +43,10 @@ class ControlAPIServerTests(unittest.TestCase):
                     "queue_length": 0, "queue_revision": 7}
         if operation == "queue":
             return {"revision": 7, "items": []}
+        if operation == "broadcast":
+            return {"transmitting": True, "cover_revision": "abc", "listeners": 2}
+        if operation == "broadcast_cover":
+            return {"data": b"image-bytes", "mime_type": "image/jpeg"}
         if operation == "playback":
             return {"action": payload["action"]}
         if operation == "reorder_queue":
@@ -84,6 +88,27 @@ class ControlAPIServerTests(unittest.TestCase):
         status, _headers, body = self.request("GET", f"{API_PREFIX}/queue")
         self.assertEqual(status, 200)
         self.assertEqual(body, {"revision": 7, "items": []})
+
+    def test_authenticated_broadcast_status_and_cover(self):
+        status, _headers, body = self.request("GET", f"{API_PREFIX}/broadcast")
+        self.assertEqual(status, 200)
+        self.assertTrue(body["transmitting"])
+        self.assertEqual(body["cover_revision"], "abc")
+        self.assertEqual(self.request("GET", f"{API_PREFIX}/broadcast",
+                                      authorization=None)[0], 401)
+
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=3)
+        try:
+            connection.request("GET", f"{API_PREFIX}/broadcast/cover",
+                               headers={"Authorization": "Bearer test-api-token"})
+            response = connection.getresponse()
+            image = response.read()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.getheader("Content-Type"), "image/jpeg")
+            self.assertEqual(response.getheader("Cache-Control"), "no-store")
+            self.assertEqual(image, b"image-bytes")
+        finally:
+            connection.close()
 
     def test_authentication_is_required_and_token_is_compared(self):
         for authorization in (None, "Bearer wrong"):

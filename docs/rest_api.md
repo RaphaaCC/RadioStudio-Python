@@ -2,6 +2,8 @@
 
 The versioned HTTP API lets trusted clients on the local network read playback status and the current **Now Playing** queue, control playback, and reorder the queue. It runs separately from the audio streaming server.
 
+It also exposes authenticated, read-only broadcast status and the current cover for Raemi integrations. Keep this HTTP API on a trusted private network or VPN: credentials and traffic are not encrypted by RadioStudio itself.
+
 ## Enable and connect
 
 Open **Settings → API**, enable the REST API, choose a port and an authentication mode, then save. The default port is `8091`; the audio server commonly uses `8090`. The API is disabled by default. When enabled, it listens on the computer's network interfaces so other LAN devices can connect. RadioStudio does not add system firewall rules.
@@ -61,6 +63,29 @@ Returns every queue entry, the current entry, and a revision value. Positions ar
 }
 ```
 
+### `GET /api/v1/broadcast`
+
+Returns the transmission state, public station metadata configured in RadioStudio, current track (including playback position and start time), built-in listener count, built-in stream state, and a content hash for the current cover. The cover hash changes only when the image changes; clients can avoid fetching unchanged images.
+
+```json
+{
+  "transmitting": true,
+  "station": {"name":"Example Radio","genre":"Ambient","url":"https://example.test","description":"Live music"},
+  "current_track": {"title":"Example Song","artist":"Example Artist","album":"Example Album","duration_ms":213000,"played_at":1730000000,"position_ms":42800},
+  "listeners": 3,
+  "cover_available": true,
+  "cover_mime_type": "image/jpeg",
+  "cover_revision": "sha256-hex-digest",
+  "local_stream": {"enabled":true,"port":8090,"tls":false,"active":true}
+}
+```
+
+`listeners` counts clients connected to the built-in stream server; external Icecast or SHOUTcast listener totals are not included. Track and station values may be empty when unavailable.
+
+### `GET /api/v1/broadcast/cover`
+
+Returns the current cover as image bytes with its detected media type. It returns `404` when no current cover is available. The endpoint is authenticated and sends `Cache-Control: no-store`.
+
 ### `POST /api/v1/playback`
 
 Send a JSON object with one action:
@@ -93,6 +118,9 @@ curl.exe -H "Authorization: Bearer <token>" `
 
 curl.exe -H "Authorization: Bearer <token>" `
   http://192.168.1.25:8091/api/v1/queue
+
+curl.exe -H "Authorization: Bearer <token>" `
+  http://192.168.1.25:8091/api/v1/broadcast
 
 curl.exe -X POST -H "Authorization: Bearer <token>" `
   -H "Content-Type: application/json" -d '{"action":"next"}' `
@@ -133,4 +161,4 @@ The machine-readable [OpenAPI 3.0.3 document](rest_api.openapi.json) is also ser
 
 ## Scope of version 1
 
-This API can read status and the current queue, reorder the existing queue, and control playback. It does not add or remove tracks, accept file paths, control transmission or AutoDJ, or trigger Cart Wall items.
+This API can read playback/broadcast status, current cover and queue, reorder the existing queue, and control playback. It does not add or remove tracks, accept file paths, control transmission or AutoDJ, or trigger Cart Wall items.

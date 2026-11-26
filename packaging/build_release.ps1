@@ -18,9 +18,9 @@ $buildDir = Join-Path $root "build"
 $configDir = Join-Path $buildDir "release-config"
 $distDir = Join-Path $buildDir "dist"
 $architecture = "x64"
-$portableName = "RadioStudio Python Sirius — v1.0.3 Beta — $architecture — Portable.exe"
-$portableBuildTitle = "RadioStudio Python Sirius - v1.0.3 Beta - $architecture - Portable"
-$setupName = "RadioStudio Python Sirius — v1.0.3 Beta — $architecture — Setup.exe"
+$portableName = "RadioStudio Python Sirius — v1.0.2 Stable — $architecture — Portable.exe"
+$portableBuildTitle = "RadioStudio Python Sirius - v1.0.2 Stable - $architecture - Portable"
+$setupName = "RadioStudio Python Sirius — v1.0.2 Stable — $architecture — Setup.exe"
 $assetsDir = Join-Path $root "radiostudio\assets"
 $iconFile = Join-Path $assetsDir "icon.ico"
 $portableEntry = Join-Path $root "packaging\portable_entry.py"
@@ -53,8 +53,8 @@ function Write-DeployConfig(
         "--windows-console-mode=disable",
         '--company-name="Raemi Labs"',
         '--product-name="RadioStudio Python Sirius"',
-        "--file-version=1.0.3.0",
-        "--product-version=1.0.3.0",
+        "--file-version=1.0.2.0",
+        "--product-version=1.0.2.0",
         '--file-description="RadioStudio Python Sirius"',
         '--copyright="Copyright (C) 2026 Raemi Labs"',
         "--include-data-dir=`"$assetsDir=radiostudio/assets`"",
@@ -137,7 +137,7 @@ try {
     $installerConfig = Join-Path $configDir "installer.pysidedeploy.spec"
     Write-DeployConfig $installerConfig "RadioStudio Python" $installerEntry $distDir "standalone"
     $env:PYTHONPATH = $root
-    & $deploy -c $installerConfig --mode standalone --no-install --no-warn
+    & $deploy -c $installerConfig --mode standalone --no-install
     if ($LASTEXITCODE -ne 0) { throw "Falha ao compilar o pacote do instalador (pyside6-deploy: $LASTEXITCODE)." }
 
     $installerFolder = Join-Path $distDir "RadioStudio Python.dist"
@@ -164,7 +164,7 @@ try {
     $portableConfig = Join-Path $configDir "portable.pysidedeploy.spec"
     Write-DeployConfig $portableConfig $portableBuildTitle `
         $portableEntry $releaseDir "onefile"
-    & $deploy -c $portableConfig --mode onefile --no-install --no-warn
+    & $deploy -c $portableConfig --mode onefile --no-install
     if ($LASTEXITCODE -ne 0) { throw "Falha ao compilar o executável portátil (pyside6-deploy: $LASTEXITCODE)." }
 
     $portableExe = Join-Path $releaseDir $portableName

@@ -21,6 +21,8 @@ Estas orientações valem para todo o repositório RadioStudio Python Sirius. Si
 - Não crie sessões SSH repetidas: se a tarefa realmente exigir SSH, mantenha e reutilize a sessão ativa. Alterações locais não precisam abrir uma sessão remota.
 - Não compile, instale, publique, faça commit, push, crie tag ou GitHub Release sem pedido explícito. O usuário cria as Releases do GitHub manualmente.
 - Quando uma compilação for pedida, confirme que o usuário quer compilar o estado atual do código e use `packaging/build_release.ps1`. Não diga que o executável reflete o código se não tiver sido compilado e verificado nesta tarefa.
+- O `pyside6-deploy` da série PySide6 6.11 não aceita `--no-warn`; mantenha as chamadas de compilação compatíveis com a versão exigida em `requirements.txt`.
+- Os executáveis históricos ficam em `release/`, separados em pastas por versão; novos arquivos diretamente em `release/` continuam ignorados pelo Git até serem organizados.
 - Se uma tarefa mudar versão, confira todos os locais relevantes: `radiostudio/config.py`, `packaging/build_release.ps1`, `packaging/installer.iss` e outros resultados de `rg`. Não altere versão só por preparar ou discutir um lançamento.
 - Faça stage seletivo se um commit tiver sido explicitamente pedido; nunca inclua automaticamente arquivos já modificados sem relação com o pedido.
 
@@ -103,3 +105,9 @@ Use sempre o Python do projeto: `.venv\Scripts\python.exe` no Windows ou `.venv/
 - Atualize o manual somente quando o uso visível mudar. O manual oficial do aplicativo é `radiostudio/assets/manual_usuario.pdf`; não crie cópias concorrentes em `output/`.
 - O projeto é source-available sob a licença presente em `LICENSE`, não o descreva como open source. Não altere licença, créditos ou direitos sem solicitação explícita.
 - Não prometa suporte, compatibilidade, ausência de bugs ou economia de recursos além do que foi efetivamente verificado.
+
+## Site público RadioStudio Python
+
+- O site público fica no checkout separado `C:\Raemi\radiostudio`; alterações nele não atualizam nem publicam o aplicativo.
+- Capturas da interface para o site devem vir do aplicativo atual, usar conteúdo demonstrativo e proporção 16:9. Preserve os arquivos em `img/` e exiba a captura principal no hero e as telas na seção `#telas`; só remova as referências visíveis do HTML quando o usuário pedir que as imagens não apareçam. Ao substituir PNGs sob nomes existentes, atualize também o parâmetro de versão nas URLs HTML/JS para evitar cache imutável do CDN.
+- Deploy do site: confira alterações locais, rode `git fetch origin main` e revise commits remotos antes de criar um commit seletivo. Gere `dist/` com `node scripts/build-locales.mjs` no checkout `C:\Raemi\radiostudio`. A VPS é `gwang.sv.raemi.xyz`, acessada com a chave `C:\Raemi\VPSKeys\gwang.sv.raemi.xyz_id_ed25519`; a pasta servida é `/www/wwwroot/radiostudio.raemi.xyz/releases/current`, e ela não é um clone Git. Envie o artefato para `/www/wwwroot/radiostudio.raemi.xyz/releases/<commit>/dist`, valide os arquivos, depois troque o link `current` atomicamente. Mantenha o release anterior e restaure o link se a verificação falhar. Após a troca, confirme por HTTPS a raiz, as seis rotas localizadas e a versão publicada. O deploy por artefato não envia commits ao GitHub.
