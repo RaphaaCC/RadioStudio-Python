@@ -1,5 +1,5 @@
 ﻿#define AppName "RadioStudio Python Sirius"
-#define AppVersion "v1.0.2 Stable"
+#define AppVersion "v1.0.3 Beta"
 #define AppPublisher "Raemi Labs"
 #define BuildDir AddBackslash(SourcePath) + "..\build\dist\RadioStudio Python.dist"
 
@@ -58,8 +58,8 @@ AppPublisherURL=https://raemi.xyz
 AppSupportURL=https://raemi.xyz
 AppContact=raphael@raemi.xyz
 AppCopyright=Copyright (C) 2026 Raemi Labs
-VersionInfoVersion=1.0.2.0
-VersionInfoTextVersion=v1.0.2 Stable
+VersionInfoVersion=1.0.3.0
+VersionInfoTextVersion=v1.0.3 Beta
 VersionInfoCompany=Raemi Labs
 VersionInfoDescription=RadioStudio Python Sirius
 VersionInfoProductName=RadioStudio Python Sirius
@@ -69,7 +69,7 @@ DisableProgramGroupPage=yes
 ShowLanguageDialog=no
 UninstallDisplayIcon={app}\RadioStudio Python.exe
 OutputDir={#SourcePath}..\release
-OutputBaseFilename=RadioStudio Python Sirius — v1.0.2 Stable — x64 — Setup
+OutputBaseFilename=RadioStudio Python Sirius — v1.0.3 Beta — x64 — Setup
 SetupIconFile={#SourcePath}..\radiostudio\assets\icon.ico
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
