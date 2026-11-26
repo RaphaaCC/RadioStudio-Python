@@ -137,7 +137,7 @@ try {
     $installerConfig = Join-Path $configDir "installer.pysidedeploy.spec"
     Write-DeployConfig $installerConfig "RadioStudio Python" $installerEntry $distDir "standalone"
     $env:PYTHONPATH = $root
-    & $deploy -c $installerConfig --mode standalone --no-install --no-warn
+    & $deploy -c $installerConfig --mode standalone --no-install
     if ($LASTEXITCODE -ne 0) { throw "Falha ao compilar o pacote do instalador (pyside6-deploy: $LASTEXITCODE)." }
 
     $installerFolder = Join-Path $distDir "RadioStudio Python.dist"
@@ -164,7 +164,7 @@ try {
     $portableConfig = Join-Path $configDir "portable.pysidedeploy.spec"
     Write-DeployConfig $portableConfig $portableBuildTitle `
         $portableEntry $releaseDir "onefile"
-    & $deploy -c $portableConfig --mode onefile --no-install --no-warn
+    & $deploy -c $portableConfig --mode onefile --no-install
     if ($LASTEXITCODE -ne 0) { throw "Falha ao compilar o executável portátil (pyside6-deploy: $LASTEXITCODE)." }
 
     $portableExe = Join-Path $releaseDir $portableName

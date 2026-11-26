@@ -3,6 +3,7 @@
 import hashlib
 import logging
 import tempfile
+import time
 import uuid
 from pathlib import Path
 
@@ -391,6 +392,51 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
             "queue_revision": self._control_api_queue_revision_value(),
         }
 
+    def _control_api_broadcast(self):
+        local = self.broadcast_panel.local_config() if getattr(self, "broadcast_panel", None) else {}
+        server = getattr(self.broadcast, "local_server", None)
+        station = getattr(self, "station_metadata", {}) or {}
+        current = self._control_api_status()["current_track"]
+        current_path = (self.tracks[self.current_index]
+                        if 0 <= self.current_index < len(self.tracks) else "")
+        metadata = self.music_library.metadata_for_track(current_path) if current_path else None
+        cover_data = bytes(getattr(self.broadcast, "cover_art_data", b"") or b"")
+        cover_mime = str(getattr(self.broadcast, "cover_art_mime_type", "") or "")
+        cover_revision = hashlib.sha256(cover_data).hexdigest() if cover_data else ""
+        position_ms = max(0, int(self.player.position()))
+        return {
+            "transmitting": bool(getattr(self.broadcast, "running", False)),
+            "station": {
+                "name": str(getattr(server, "station", "") or local.get("station") or station.get("name") or "RadioStudio Python"),
+                "genre": str(getattr(server, "genre", "") or station.get("genre") or ""),
+                "url": str(getattr(server, "url", "") or station.get("url") or ""),
+                "description": str(getattr(server, "description", "") or station.get("description") or ""),
+            },
+            "current_track": ({
+                "title": str((metadata.title if metadata else "") or (current or {}).get("title") or ""),
+                "artist": str((metadata.artist if metadata else "") or (current or {}).get("artist") or ""),
+                "album": str((metadata.album if metadata else "") or (current or {}).get("album") or ""),
+                "duration_ms": max(0, int(self.player.duration())),
+                "played_at": max(0, int(time.time() - position_ms / 1000)),
+                "position_ms": position_ms,
+            } if current else None),
+            "listeners": max(0, int(getattr(server, "listeners", 0) or 0)),
+            "cover_available": bool(cover_data),
+            "cover_mime_type": cover_mime,
+            "cover_revision": cover_revision,
+            "local_stream": {
+                "enabled": bool(local.get("enabled")),
+                "port": int(local.get("port") or 8090),
+                "tls": bool(getattr(server, "tls", False)),
+                "active": bool(server),
+            },
+        }
+
+    def _control_api_broadcast_cover(self):
+        data = bytes(getattr(self.broadcast, "cover_art_data", b"") or b"")
+        return {"data": data, "mime_type": str(
+            getattr(self.broadcast, "cover_art_mime_type", "") or "")}
+
     def _control_api_queue(self):
         revision = self._control_api_queue_revision_value()
         items = [self._control_api_queue_item(index)
@@ -405,6 +451,10 @@ class RadioStudio(EventLogMixin, ExplorerMixin, PlaylistMixin, SettingsControlle
                            "RadioStudio is shutting down.")
         if operation == "status":
             return self._control_api_status()
+        if operation == "broadcast":
+            return self._control_api_broadcast()
+        if operation == "broadcast_cover":
+            return self._control_api_broadcast_cover()
         if operation == "queue":
             return self._control_api_queue()
         if operation == "playback":
